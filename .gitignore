@@ -1,0 +1,20 @@
+#Apenas o sistema do meu macos
+.DS_Store 
+
+# Segredos
+.env
+
+# Ambiente
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Dados: sempre recriados pelos scripts, nunca versionados
+data/raw/*
+data/trusted/*
+data/quarentena/*
+!data/raw/.gitkeep
+!data/trusted/.gitkeep
+!data/quarentena/.gitkeep
+

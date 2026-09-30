@@ -1,0 +1,22 @@
+[project]
+name = "pix-maranhao"
+version = "0.1.0"
+description = "Etapa 1 - Introducao a Ciencia de Dados: Pix por municipio no Maranhao"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "duckdb>=1.0",
+    "pandas>=2.2",
+    "pandera>=0.20",
+    "pyarrow>=16.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.0",
+    "missingno>=0.5",
+]
