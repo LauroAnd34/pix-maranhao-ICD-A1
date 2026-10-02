@@ -1,0 +1,143 @@
+---
+title: "Diagnóstico dos dados bruto - Pix por municípios - Maranhão"
+subtitle: "Introdução à Ciência de Dados"
+author: "Lauro Andrade(Matrícula: 20231SI0024) Paulo André (20231SI0021) e Raquel Coelho (20231SI0018)"
+date: today
+lang: pt-BR
+format:
+  html:
+    toc: true
+    code-fold: false
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+---
+
+```{python}
+# | label: setup
+import json
+import pandas as pd
+
+pd.set_option("display.width", 120)
+pd.set_option("display.max_columns", None)
+
+ARQUIVO = 'data/raw/pix_dados_abertos/2026-10-02/pix_municipios_maranhao.json'
+
+with open(ARQUIVO, 'r', encoding='utf-8') as f:
+    conteudo = json.load(f)
+
+# Extraindo a lista de registros.
+df = pd.DataFrame(conteudo['registros'])
+print(f"Lidos {len(df)} registros da fonte: {conteudo['fonte']}")
+```
+
+## 1. Perfil dos dados brutos
+
+```{python}
+# | label: perfil-final
+# Tabela de diagnóstico dos dados em data/raw
+perfil = pd.DataFrame({
+    'column_type': df.dtypes.astype(str),
+    'count': df.count(), # Conta valores não-nulos
+    'approx_unique': df.nunique(),
+    'null_percentage': (df.isna().mean() * 100).round(2),
+    'min': df.apply(lambda x: x.dropna().min() if not x.dropna().empty else None),
+    'max': df.apply(lambda x: x.dropna().max() if not x.dropna().empty else None)
+}).reset_index().rename(columns={'index': 'column_name'})
+
+perfil[["column_name", "column_type", "count", "approx_unique", "null_percentage", "min", "max"]]
+```
+
+O perfil do arquivo revela uma base estruturada e limpa, sem ausências de preenchimento (null_percentage igual a 0.0 em todas as colunas). O campo approx_unique da coluna Municipio registra exatamente 217 valores distintos, garantindo a cobertura total do estado do Maranhão, observados ao longo de 24 meses (de 202401 a 202512). As variáveis financeiras apresentam limites adequados: não há saldos negativos e os valores mínimos partem da casa das centenas de milhares (como o mínimo de R$ 149.416,79 em VL_RecebedorPJ), refletindo corretamente a magnitude de um volume financeiro agregado municipal. O principal ponto de atenção é a coluna AnoMes, que foi tipada como numérico (int64) e demandará conversão para formato de data nas etapas de transformação para habilitar ordenações e comparações temporais de forma correta. Além disso, as colunas financeiras deverão ser formatadas para duas casas decimais, corrigindo pequenas imprecisões de ponto flutuante.   
+
+## 2. Duplicatas
+
+```{python}
+# | label: duplicatas
+CHAVE = ["AnoMes", "Municipio_Ibge"]
+
+dup_linha = int(df.duplicated().sum())
+dup_chave = int(df.duplicated(subset=CHAVE).sum())
+
+print(f"linhas: {len(df)}")
+print(f"duplicadas por linha inteira: {dup_linha}")
+print(f"duplicadas por chaves ({CHAVE}): {dup_chave}")
+```
+
+As contagens de duplicatas (tanto por linha inteira quanto pelas chaves compostas de mês e município) retornaram zero. Como o arquivo do PIX não traz transações individuais, mas sim totais mensais por cidade, foi necessário criar uma chave composta unindo o mês (AnoMes) e o código da cidade (Municipio_Ibge). A contagem por linha inteira verifica se existem cópias exatas na base (onde todas as colunas são idênticas), enquanto a verificação pela chave procura registros com conteúdos conflitantes apontando para o mesmo município no mesmo mês. Como ambas retornaram zero, isso indica que a API do Banco Central forneceu um conjunto idempotente e que o processo de extração não gerou registros espelhos nem conflito de conteúdo.
+
+```{python}
+# | label: dedup
+antes = len(df)
+df = df.drop_duplicates(subset=CHAVE).reset_index(drop=True)
+print(f"{antes} -> {len(df)} linhas apos remover cópias exatas")
+
+assert len(df) == 5208, "contagem apos dedup mudou"
+```
+
+## 3. Tabela de decisão
+
+```{python}
+# | label: ausencia-por-coluna
+ausencia = (df.isna().mean() * 100).round(1)
+ausencia[ausencia > 0].sort_values(ascending=False).to_frame("pct_nulo")
+```
+
+A avaliação de dados faltantes confirmou o perfil inicial: não existem valores nulos no conjunto analisado. O bloco de diagnóstico acima retornou um resultado vazio, comprovando que todas as colunas possuem preenchimento completo.
+Conforme as recomendações do projeto de que um dado limpo e medido não exige correções artificiais, observamos a qualidade da base. Sem lacunas para investigar, torna-se desnecessário aplicar consultas de agrupamento, classificar mecanismos nas categorias de Rubin (MCAR, MAR, MNAR) ou definir estratégias de imputação em uma tabela de decisão.
+
+
+## 4. Tratamento
+
+```{python}
+# | label: tratamento
+# Como a base não possui nulos ou outliers, aplicamos apenas a Higiene de Formato.
+
+# 1. Convertendo AnoMes (int64) para datetime
+df["AnoMes"] = pd.to_datetime(df["AnoMes"].astype(str), format="%Y%m")
+
+# 2. Arredondando os valores financeiros para 2 casas decimais
+colunas_financeiras = [
+    "VL_PagadorPF", "VL_PagadorPJ", 
+    "VL_RecebedorPF", "VL_RecebedorPJ"
+]
+df[colunas_financeiras] = df[colunas_financeiras].round(2)
+
+assert pd.api.types.is_datetime64_any_dtype(df["AnoMes"]), "AnoMes não virou datetime"
+assert df["AnoMes"].notna().all(), "A conversão gerou datas nulas (NaT)"
+```
+
+Como a base original não apresentou valores ausentes ou extremos, o tratamento limitou-se à higiene de formato, que ajusta a legibilidade do arquivo para a máquina sem alterar o que o dado afirma na realidade. A conversão da coluna AnoMes para datetime habilita cálculos e ordenações temporais precisas, enquanto o arredondamento financeiro corrige artefatos visuais de ponto flutuante, entregando dados tecnicamente padronizado e pronto para as próximas análises. 
+
+## 5. Perfil dos dados pós tratamento
+
+```{python}
+# | label: perfil
+# Tabela de diagnóstico dos dados pós higiene de formato
+perfil = pd.DataFrame({
+    'column_type': df.dtypes.astype(str),
+    'count': df.count(), # Conta valores não-nulos
+    'approx_unique': df.nunique(),
+    'null_percentage': (df.isna().mean() * 100).round(2),
+    'min': df.apply(lambda x: x.dropna().min() if not x.dropna().empty else None),
+    'max': df.apply(lambda x: x.dropna().max() if not x.dropna().empty else None)
+}).reset_index().rename(columns={'index': 'column_name'})
+
+perfil[["column_name", "column_type", "count", "approx_unique", "null_percentage", "min", "max"]]
+```
+
+## 6. Quarentena
+
+A etapa de perfilamento não identificou valores impossíveis, erros de formatação ou distorções suspeitas nos dados numéricos, visto que todos os limites financeiros refletem volumes de transação agregados coerentes. Como não há nenhum registro suspeito que o grupo não conseguiu classificar, nenhum dado precisou ser apartado, o que elimina a necessidade de gerar um arquivo de quarentena. A base mantém todas as suas linhas originais íntegras, em conformidade com a recomendação de que o dado verificado como limpo não exige intervenções artificiais.
+
+## 7. Erro da imputação, por mascaramento
+
+A avaliação de completude confirmou que o conjunto de dados não possui valores ausentes. Sem lacunas para preencher na etapa de tratamento, o recurso de imputação não foi utilizado. Conforme as recomendações do projeto, isso elimina a necessidade e a viabilidade matemática de aplicar o teste de estimativa de erro por mascaramento, visto que não existem parâmetros estimados para serem aferidos contra um gabarito.
+
+## Fechamento
+
+
+1- O arquivo final entregue por este pipeline contém exclusivamente dados reais medidos e reportados pela origem, sem nenhuma estimativa, pois a completude total da base dispensou o uso de imputações.
+2- Caso algum valor tivesse sido estimado matematicamente para preencher ausências, a distinção para o leitor seria feita através da presença de colunas indicadoras booleanas criadas especificamente para marcar e rastrear as linhas alteradas.
+3- Como essas colunas não foram necessárias,100% dos registros representam o fenômeno original, tendo passado apenas por adequações de higiene de formato.
