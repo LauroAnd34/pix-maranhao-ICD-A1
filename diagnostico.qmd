@@ -32,13 +32,6 @@ df = pd.DataFrame(conteudo['registros'])
 print(f"Lidos {len(df)} registros da fonte: {conteudo['fonte']}")
 ```
 
-```{python}
-# | label: teste
-df.loc[df['VL_RecebedorPJ'].idxmin(), 'Municipio']
-
-df.loc[df['VL_PagadorPJ'].idxmax(), 'Municipio']
-```
-
 ## 1. Perfil dos dados brutos
 
 ```{python}
