@@ -32,6 +32,13 @@ df = pd.DataFrame(conteudo['registros'])
 print(f"Lidos {len(df)} registros da fonte: {conteudo['fonte']}")
 ```
 
+```{python}
+# | label: teste
+df.loc[df['VL_RecebedorPJ'].idxmin(), 'Municipio']
+
+df.loc[df['VL_PagadorPJ'].idxmax(), 'Municipio']
+```
+
 ## 1. Perfil dos dados brutos
 
 ```{python}
@@ -49,7 +56,22 @@ perfil = pd.DataFrame({
 perfil[["column_name", "column_type", "count", "approx_unique", "null_percentage", "min", "max"]]
 ```
 
-O perfil do arquivo revela uma base estruturada e limpa, sem ausências de preenchimento (null_percentage igual a 0.0 em todas as colunas). O campo approx_unique da coluna Municipio registra exatamente 217 valores distintos, garantindo a cobertura total do estado do Maranhão, observados ao longo de 24 meses (de 202401 a 202512). As variáveis financeiras apresentam limites adequados: não há saldos negativos e os valores mínimos partem da casa das centenas de milhares (como o mínimo de R$ 149.416,79 em VL_RecebedorPJ), refletindo corretamente a magnitude de um volume financeiro agregado municipal. O principal ponto de atenção é a coluna AnoMes, que foi tipada como numérico (int64) e demandará conversão para formato de data nas etapas de transformação para habilitar ordenações e comparações temporais de forma correta. Além disso, as colunas financeiras deverão ser formatadas para duas casas decimais, corrigindo pequenas imprecisões de ponto flutuante.   
+O perfil do arquivo revela uma base estruturada e limpa, sem ausências de preenchimento (null_percentage igual a 0.0 em todas as colunas). O campo approx_unique da coluna Municipio registra exatamente 217 valores distintos, garantindo a cobertura total do estado do Maranhão, observados ao longo de 24 meses (de 202401 a 202512). As variáveis financeiras apresentam limites adequados: não há saldos negativos e os valores mínimos partem da casa das centenas de milhares, refletindo corretamente a magnitude de um volume financeiro agregado municipal. O principal ponto de atenção é a coluna AnoMes, que foi tipada como numérico (int64) e demandará conversão para formato de data nas etapas de transformação para habilitar ordenações e comparações temporais de forma correta. Além disso, as colunas financeiras deverão ser formatadas para duas casas decimais, corrigindo pequenas imprecisões de ponto flutuante.
+
+```{python}
+# | label: validacao-extremos
+# Cruzamento dos limites financeiros com os municípios correspondentes
+min_municipio = df.loc[df['VL_RecebedorPJ'].idxmin(), 'Municipio']
+min_valor = df['VL_RecebedorPJ'].min()
+
+max_municipio = df.loc[df['VL_PagadorPJ'].idxmax(), 'Municipio']
+max_valor = df['VL_PagadorPJ'].max()
+
+print(f"Piso transacional: {min_municipio} (VL_RecebedorPJ: {min_valor})")
+print(f"Teto transacional: {max_municipio} (VL_PagadorPJ: {max_valor})")
+```
+
+Aprofundando a validação de acurácia dos extremos revelados na tabela, o piso e o teto transacionais confirmam a coerência da base com a realidade econômica do estado. O valor financeiro mínimo da base (149416.79 na variável VL_RecebedorPJ) pertence a Bacurituba, um município de microporte com cerca de 5 mil habitantes, refletindo perfeitamente a sua baixa densidade comercial. No extremo oposto, o teto de pagamentos realizados por pessoas jurídicas (VL_PagadorPJ) atingiu a marca de 15215859998.389999 em São Luís. Esse limite máximo é plenamente justificável, refletindo com exatidão a concentração do principal polo econômico, industrial e de serviços do estado na capital. 
 
 ## 2. Duplicatas
 
@@ -75,6 +97,8 @@ print(f"{antes} -> {len(df)} linhas apos remover cópias exatas")
 
 assert len(df) == 5208, "contagem apos dedup mudou"
 ```
+
+
 
 ## 3. Tabela de decisão
 
