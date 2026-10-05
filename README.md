@@ -47,8 +47,12 @@ uv run python src/transform.py
   Testado de verdade contra a API: **5.208 registros** (217 municípios × 24
   meses), coleta 24/24 meses sem falha.
 
+- **`src/transform.py`** — lê os JSONs da pasta raw, aplica o Contrato Pandera garantindo a tipagem das colunas financeiras e geográficas, e cria a métrica da Pergunta Analítica (o *saldo relativo*). Como política, adotou-se o Fail-Stop, visto que a base bruta foi provada 100% íntegra (0 nulos). O pipeline grava o arquivo final tipado e otimizado em `data/trusted/pix_maranhao_trusted.parquet`. A pasta `data/quarentena/` é recriada para cumprir o pipeline, mas permanece vazia.
+
+
 
 ## Uso de IA
 
-CHatGPT foi usado para: pesquisa e comparação de fontes de dados
+ChatGPT foi usado para: pesquisa e comparação de fontes de dados
 abertas; formulação e refinamento iterativo da pergunta analítica.
+Gemini foi usado para: revisão do código e do projeto.
