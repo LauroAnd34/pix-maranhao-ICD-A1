@@ -175,6 +175,15 @@ def main() -> None:
         meses_ok.append(ano_mes)
         log.info("%s: %d registros.", ano_mes, len(registros))
 
+    # Coleta parcial não é gravada: o arquivo de hoje bloquearia a reexecução
+    # e o trusted nasceria sem os meses que faltaram.
+    if meses_falhos:
+        log.error(
+            "Meses que falharam: %s. Nada foi gravado, rode de novo.",
+            ", ".join(meses_falhos),
+        )
+        sys.exit(1)
+
     if not todos_os_registros:
         log.error("Nenhum registro coletado. Nada gravado.")
         sys.exit(1)
@@ -202,8 +211,6 @@ def main() -> None:
         "Meses coletados com sucesso: %d/%d (%s)",
         len(meses_ok), len(meses), ", ".join(meses_ok) or "-",
     )
-    if meses_falhos:
-        log.warning("Meses que falharam: %s", ", ".join(meses_falhos))
     log.info("Total de registros: %d", len(todos_os_registros))
     log.info("Gravado em: %s", saida.resolve())
 
