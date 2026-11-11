@@ -27,8 +27,8 @@ da aula-3)
 ## Como rodar
 
 ```bash
-git clone <aqui vai a url do nosso repositório>
-cd <pasta do projeto>
+git clone https://github.com/LauroAnd34/pix-maranhao-ICD-A1.git
+cd pix-maranhao-ICD-A1
 cp .env.example .env 
 uv sync
 uv run python src/ingest.py
