@@ -9,6 +9,12 @@ alterados) e não um simples erro pontual de preenchimento. Nesse cenário,
 continuar o pipeline geraria métricas silenciosamente erradas. Portanto,
 a decisão mais segura é parar imediatamente, exibir o relatório de erros
 agrupado por motivo, e exigir intervenção humana antes de prosseguir.
+
+Limite da decisão: a política vale enquanto a fonte se mantiver estável. O
+fato de a coleta atual passar sem nenhuma violação é o resultado de uma
+coleta, não uma garantia. Se o Banco Central passar a publicar com frequência
+linhas com problemas pontuais, e não mudanças de estrutura, a quarentena passa
+a ser a escolha mais adequada e esta decisão deve ser revista.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-import pandera as pa
+import pandera.pandas as pa
 
 # Configuração de Logs
 logging.basicConfig(
@@ -36,27 +42,53 @@ QUARENTENA_DIR = Path("data/quarentena")
 
 # 1. CONTRATO DE DADOS (Pandera)
 class ContratoPix(pa.DataFrameModel):
-    AnoMes: int = pa.Field(
-        ge=202401, le=202512,
+    # Tipo de cada coluna. As faixas ficam nos checks logo abaixo, cada um com
+    # um error= em snake_case: é esse texto que aparece como motivo no resumo
+    # do Fail-Stop.
+    AnoMes: int
+    Estado: str
+    Estado_Ibge: int
+    Municipio: str
+    Municipio_Ibge: int
+    Regiao: str
+    Sigla_Regiao: str
+    QT_PagadorPF: int
+    QT_PagadorPJ: int
+    QT_RecebedorPF: int
+    QT_RecebedorPJ: int
+    QT_PES_PagadorPF: int
+    QT_PES_PagadorPJ: int
+    QT_PES_RecebedorPF: int
+    QT_PES_RecebedorPJ: int
+    VL_PagadorPF: float
+    VL_PagadorPJ: float
+    VL_RecebedorPF: float
+    VL_RecebedorPJ: float
+
+    @pa.check("AnoMes", error="anomes_fora_do_periodo")
+    def anomes_no_periodo(cls, serie: pd.Series) -> pd.Series:
+        """A coleta cobre 2024 e 2025 inteiros."""
+        return serie.between(202401, 202512)
+
+    @pa.check("Estado_Ibge", error="estado_ibge_fora_do_escopo")
+    def estado_e_maranhao(cls, serie: pd.Series) -> pd.Series:
+        """O filtro da coleta é Estado_Ibge eq 21 (Maranhão)."""
+        return serie == 21
+
+    @pa.check(
+        "QT_PagadorPF", "QT_PagadorPJ", "QT_RecebedorPF", "QT_RecebedorPJ",
+        "QT_PES_PagadorPF", "QT_PES_PagadorPJ", "QT_PES_RecebedorPF", "QT_PES_RecebedorPJ",
+        error="quantidade_negativa",
     )
-    Estado: str = pa.Field()
-    Estado_Ibge: int = pa.Field(eq=21)
-    Municipio: str = pa.Field()
-    Municipio_Ibge: int = pa.Field()
-    Regiao: str = pa.Field()
-    Sigla_Regiao: str = pa.Field()
-    QT_PagadorPF: int = pa.Field(ge=0)
-    QT_PagadorPJ: int = pa.Field(ge=0)
-    QT_RecebedorPF: int = pa.Field(ge=0)
-    QT_RecebedorPJ: int = pa.Field(ge=0)
-    QT_PES_PagadorPF: int = pa.Field(ge=0)
-    QT_PES_PagadorPJ: int = pa.Field(ge=0)
-    QT_PES_RecebedorPF: int = pa.Field(ge=0)
-    QT_PES_RecebedorPJ: int = pa.Field(ge=0)
-    VL_PagadorPF: float = pa.Field(ge=0)
-    VL_PagadorPJ: float = pa.Field(ge=0)
-    VL_RecebedorPF: float = pa.Field(ge=0)
-    VL_RecebedorPJ: float = pa.Field(ge=0)
+    def quantidade_nao_negativa(cls, serie: pd.Series) -> pd.Series:
+        return serie >= 0
+
+    @pa.check(
+        "VL_PagadorPF", "VL_PagadorPJ", "VL_RecebedorPF", "VL_RecebedorPJ",
+        error="valor_negativo",
+    )
+    def valor_nao_negativo(cls, serie: pd.Series) -> pd.Series:
+        return serie >= 0
 
     # 2. REGRA DE NEGÓCIO DE TABELA (envolvendo duas ou mais colunas)
     # ---------------------------------------------------------------
@@ -76,26 +108,55 @@ class ContratoPix(pa.DataFrameModel):
         total_pago = df["VL_PagadorPF"] + df["VL_PagadorPJ"]
         return (total_recebido + total_pago) > 0
 
+    # Regra de tabela: a chave do grão é (AnoMes, Municipio_Ibge), um município
+    # por mês. Sem esta regra, uma coleta lida duas vezes (ou duas coletas de
+    # dias diferentes) passaria pelo contrato com todas as linhas repetidas.
+    @pa.dataframe_check(error="chave_municipio_mes_repetida")
+    def chave_unica(cls, df: pd.DataFrame) -> pd.Series:
+        """Cada par (AnoMes, Municipio_Ibge) deve aparecer uma única vez."""
+        return ~df.duplicated(subset=["AnoMes", "Municipio_Ibge"], keep=False)
+
+    # Regra de tabela que relaciona colunas entre si.
+    # Origem da regra: dedução do grupo a partir da definição das colunas. Toda
+    # pessoa contada em QT_PES_ fez pelo menos uma transação, então a quantidade
+    # de transações (QT_) nunca pode ser menor que a de pessoas distintas
+    # (QT_PES_), em cada uma das quatro combinações pagador/recebedor e PF/PJ.
+    # A regra não está na documentação do Bacen, é suposição nossa. Foi
+    # verificada no diagnostico.qmd, onde vale para as 5.208 linhas.
+    @pa.dataframe_check(error="transacoes_menor_que_pessoas_distintas")
+    def transacoes_maiores_que_pessoas(cls, df: pd.DataFrame) -> pd.Series:
+        """QT_ >= QT_PES_ nas quatro combinações pagador/recebedor e PF/PJ."""
+        return (
+            (df["QT_PagadorPF"] >= df["QT_PES_PagadorPF"])
+            & (df["QT_PagadorPJ"] >= df["QT_PES_PagadorPJ"])
+            & (df["QT_RecebedorPF"] >= df["QT_PES_RecebedorPF"])
+            & (df["QT_RecebedorPJ"] >= df["QT_PES_RecebedorPJ"])
+        )
+
     class Config:
         coerce = True
         strict = True
 
 # Funções do pipeline (uma responsabilidade por função)
 def ler_dados_brutos() -> pd.DataFrame:
-    """Lê todos os arquivos JSON da pasta raw e consolida em um único DataFrame."""
-    arquivos_json = list(RAW_DIR.glob("*/*.json"))
+    """Lê a coleta mais recente da pasta raw e devolve um DataFrame.
+
+    O ingest.py grava uma pasta por data de coleta. Ler todas juntaria coletas
+    de dias diferentes e repetiria cada município-mês, então lemos só a última.
+    As pastas têm a data em formato ISO, por isso a ordem alfabética é a
+    ordem cronológica.
+    """
+    arquivos_json = sorted(RAW_DIR.glob("*/pix_municipios_maranhao.json"))
     if not arquivos_json:
         log.error("Nenhum arquivo de dados brutos encontrado em data/raw/.")
         sys.exit(1)
 
-    todos_registros: list[dict] = []
-    for arquivo in arquivos_json:
-        with open(arquivo, "r", encoding="utf-8") as f:
-            conteudo = json.load(f)
-            todos_registros.extend(conteudo.get("registros", []))
+    arquivo = arquivos_json[-1]
+    with open(arquivo, "r", encoding="utf-8") as f:
+        conteudo = json.load(f)
 
-    df = pd.DataFrame(todos_registros)
-    log.info("Lidos %d registros brutos de %d arquivo(s).", len(df), len(arquivos_json))
+    df = pd.DataFrame(conteudo.get("registros", []))
+    log.info("Lidos %d registros brutos de %s.", len(df), arquivo)
     return df
 
 
@@ -114,10 +175,13 @@ def validar_dados(df: pd.DataFrame) -> pd.DataFrame:
 
     except pa.errors.SchemaErrors as exc:
         # RESUMO POR MOTIVO
+        # failure_cases traz uma falha por célula, então uma linha ruim aparece
+        # várias vezes. Contamos linhas distintas por motivo; falha sem linha
+        # (de estrutura, como coluna que não está no contrato) conta uma por entrada.
         resumo = (
             exc.failure_cases
-            .groupby("check")
-            .size()
+            .groupby("check")["index"]
+            .agg(lambda s: s.nunique() if s.notna().any() else len(s))
             .reset_index(name="contagem")
             .rename(columns={"check": "motivo"})
             .sort_values("contagem", ascending=False)
@@ -127,8 +191,8 @@ def validar_dados(df: pd.DataFrame) -> pd.DataFrame:
         log.error("FAIL-STOP: violações encontradas no contrato!")
         log.error("Resumo por motivo:")
         for _, linha in resumo.iterrows():
-            log.error("  %-40s %d caso(s)", linha["motivo"], linha["contagem"])
-        log.error("Total de casos com falha: %d", resumo["contagem"].sum())
+            log.error("  %-40s %d ocorrência(s)", linha["motivo"], linha["contagem"])
+        log.error("Total de falhas: %d", resumo["contagem"].sum())
         log.error("=" * 60)
         log.error(
             "Pipeline interrompido. Corrija os dados ou revise o contrato."
@@ -178,12 +242,16 @@ def main() -> None:
     salvar_trusted(df_transformado)
 
     # RESUMO FINAL
+    # A contagem sai da diferença entre o que foi lido e o que foi aprovado,
+    # e não de um número escrito no código.
+    rejeitados = len(df_raw) - len(df_transformado)
     log.info("=" * 60)
     log.info("RESUMO DA EXECUÇÃO")
+    log.info("  Registros lidos      : %d", len(df_raw))
     log.info("  Registros aprovados  : %d", len(df_transformado))
-    log.info("  Registros rejeitados : 0")
+    log.info("  Registros rejeitados : %d", rejeitados)
     log.info("  Política             : Fail-Stop (lazy=True)")
-    log.info("  Motivos de rejeição  : nenhum")
+    log.info("  Motivos de rejeição  : %s", "nenhum" if rejeitados == 0 else "ver relatório acima")
     log.info("=" * 60)
 
 
