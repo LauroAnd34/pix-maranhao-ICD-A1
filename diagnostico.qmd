@@ -87,100 +87,7 @@ print(f"Piso transacional: {min_municipio} (VL_RecebedorPJ: {min_valor})")
 print(f"Teto transacional: {max_municipio} (VL_PagadorPJ: {max_valor})")
 ```
 
-O valor financeiro mínimo da base (149416.79 na variável VL_RecebedorPJ) pertence a Bacurituba, e o teto de pagamentos realizados por pessoas jurídicas (VL_PagadorPJ), de 15215859998.389999, pertence a São Luís. Esse cruzamento mostra que os extremos globais são plausíveis para a capital e para um município pequeno. Ele não mostra que cada valor está certo: um valor pode ser normal para São Luís e anormal para o município a que pertence. Por isso a checagem que importa compara cada município com a sua própria série, na subseção seguinte.
-
-### Extremos contra a própria série de cada município
-
-```{python}
-# | label: extremos-por-municipio
-# Razão entre o volume do mês (pago + recebido) e a mediana do mesmo município
-# nos 24 meses. O limiar de 2 vezes só sinaliza, quem decide é o contexto.
-# razao_qt_pj faz o mesmo com a quantidade de transações de pessoa jurídica.
-extremos = con.sql("""
-WITH base AS (
-    SELECT Municipio, AnoMes,
-           VL_PagadorPF + VL_PagadorPJ + VL_RecebedorPF + VL_RecebedorPJ AS vl_total,
-           QT_PagadorPJ + QT_RecebedorPJ                                 AS qt_pj
-    FROM df
-),
-razao AS (
-    SELECT Municipio, AnoMes,
-           round(vl_total / median(vl_total) OVER (PARTITION BY Municipio), 2) AS razao_vl,
-           round(qt_pj    / median(qt_pj)    OVER (PARTITION BY Municipio), 1) AS razao_qt_pj
-    FROM base
-)
-SELECT * FROM razao WHERE razao_vl > 2 ORDER BY razao_vl DESC
-""").df()
-extremos
-```
-
-Dos 5.208 pares município-mês, só quatro passam de duas vezes a mediana do próprio município, e dois passam de três vezes: Arame em junho de 2025 (3,51 vezes) e Santo Antônio dos Lopes em dezembro de 2025 (3,07 vezes). Os outros dois são Arame em julho de 2025 (2,34) e Santo Antônio dos Lopes em maio de 2025 (2,24). O limiar só sinaliza. Para decidir se cada caso é erro ou fato, olhamos a quantidade de transações junto com o valor.
-
-```{python}
-# | label: extremos-detalhe
-# Série de abril a dezembro de 2025 dos dois municípios, em milhões de reais.
-# ticket_medio_pj é o valor pago por PJ dividido pela quantidade de transações.
-con.sql("""
-SELECT Municipio, AnoMes,
-       round((VL_PagadorPF + VL_PagadorPJ + VL_RecebedorPF + VL_RecebedorPJ) / 1e6, 1) AS vl_total_milhoes,
-       round(VL_PagadorPJ / 1e6, 1)             AS vl_pagador_pj_milhoes,
-       QT_PagadorPJ, QT_RecebedorPJ, QT_PES_PagadorPJ,
-       round(VL_PagadorPJ / QT_PagadorPJ, 2)    AS ticket_medio_pj
-FROM df
-WHERE Municipio IN ('ARAME', 'SANTO ANTÔNIO DOS LOPES')
-  AND AnoMes BETWEEN 202504 AND 202512
-ORDER BY Municipio, AnoMes
-""").df()
-```
-
-**Arame.** O volume sobe junto com a quantidade de transações de pessoa jurídica. A quantidade paga por PJ vai de 14.840 em maio para 3.087.293 em junho e 1.581.052 em julho, e volta a 14.696 em agosto. A quantidade de pessoas jurídicas distintas quase não muda (273 em junho e 281 em julho), e as colunas de pessoa física ficam perto da mediana. O ticket médio do pagador PJ cai de cerca de R$ 1.570 em maio para R$ 95 em junho. São, portanto, milhões de transações pequenas feitas pelas mesmas empresas durante dois meses, e depois o padrão volta ao normal. Isso não parece erro de captura: um erro de escala, como o ponto decimal perdido que a aula-4 mostra, multiplicaria só o valor, e aqui a quantidade também sobe. O dado não diz a causa. Lembrando que o município é o do cadastro e não o da transação, uma hipótese é uma empresa com sede em Arame que fez muitos pagamentos pequenos nesses dois meses, mas é só hipótese e não conseguimos confirmar com este dado.
-
-**Santo Antônio dos Lopes.** O caso é diferente. Em dezembro de 2025 o volume sobe (R$ 383,1 milhões, contra uma mediana próxima de R$ 125 milhões) com a quantidade de transações PJ quase igual à dos meses anteriores (razão de 1,6). O valor pago por PJ passa de R$ 8,3 milhões em novembro para R$ 117,0 milhões em dezembro, e o ticket médio vai de cerca de R$ 560 para R$ 6.940. Maio, julho e dezembro de 2025 mostram o mesmo padrão, o que indica uma série em que poucas operações PJ de valor alto fazem o volume oscilar muito de um mês para outro, sem mudança na quantidade de transações. Tratamos como fato, não como erro.
-
-```{python}
-# | label: extremos-efeito-saldo
-# Efeito dos dois meses de Arame no saldo relativo anual, que é a medida da
-# pergunta analítica: (recebido - pago) / (recebido + pago).
-con.sql("""
-WITH a AS (
-    SELECT AnoMes,
-           VL_RecebedorPF + VL_RecebedorPJ AS rec,
-           VL_PagadorPF   + VL_PagadorPJ   AS pag
-    FROM df WHERE Municipio = 'ARAME'
-),
-r AS (
-    SELECT '2024' AS recorte, rec, pag FROM a WHERE AnoMes BETWEEN 202401 AND 202412
-    UNION ALL
-    SELECT '2025 completo', rec, pag FROM a WHERE AnoMes BETWEEN 202501 AND 202512
-    UNION ALL
-    SELECT '2025 sem jun e jul', rec, pag FROM a
-    WHERE AnoMes BETWEEN 202501 AND 202512 AND AnoMes NOT IN (202506, 202507)
-)
-SELECT recorte,
-       round((sum(rec) - sum(pag)) / (sum(rec) + sum(pag)), 4) AS saldo_relativo
-FROM r GROUP BY recorte ORDER BY recorte
-""").df()
-```
-
-Esse caso importa para a pergunta do grupo. O saldo relativo de Arame é -0,0150 em 2024 e -0,0133 em 2025, uma variação de +0,0017. Sem junho e julho de 2025, o valor de 2025 seria -0,0192 e a variação seria de -0,0042, com o sinal trocado. Na Etapa 2, a variação de Arame precisa ser apresentada com e sem esses dois meses.
-
-**Decisão.** Os quatro pares município-mês ficam no dado, sem alteração e sem remoção. Não há regra conhecida que corrija um valor, e nada indica erro de formato ou de escala. O limite dessa conclusão é que, com os dados que temos, não dá para separar um fato real de uma falha na origem: só dá para dizer que não há sinal de erro de captura.
-
-### Coerência entre colunas
-
-```{python}
-# | label: coerencia-colunas
-con.sql("""
-SELECT
-  count(*) FILTER (WHERE QT_PagadorPF   < QT_PES_PagadorPF)   AS viola_pagador_pf,
-  count(*) FILTER (WHERE QT_PagadorPJ   < QT_PES_PagadorPJ)   AS viola_pagador_pj,
-  count(*) FILTER (WHERE QT_RecebedorPF < QT_PES_RecebedorPF) AS viola_recebedor_pf,
-  count(*) FILTER (WHERE QT_RecebedorPJ < QT_PES_RecebedorPJ) AS viola_recebedor_pj
-FROM df
-""").df()
-```
-
-Toda pessoa que aparece em uma coluna QT_PES_ fez pelo menos uma transação, então a quantidade de transações não pode ser menor que a de pessoas distintas. Essa regra não está na documentação do Bacen, é uma dedução do grupo. Ela vale para as 5.208 linhas, com zero violações nas quatro combinações, e vira regra de tabela no transform.py.
+O valor financeiro mínimo da base (149416.79 na variável VL_RecebedorPJ) pertence a Bacurituba, e o teto de pagamentos realizados por pessoas jurídicas (VL_PagadorPJ), de 15215859998.389999, pertence a São Luís. Esse cruzamento mostra que os extremos globais são plausíveis para a capital e para um município pequeno. Ele não mostra que cada valor está certo: um valor pode ser normal para São Luís e anormal para o município a que pertence. A checagem que importa, contra a série de cada município, está na Seção 3, depois da remoção de duplicatas.
 
 ## 2. Duplicatas
 
@@ -197,7 +104,7 @@ FROM df
 """).df()
 ```
 
-As contagens de duplicatas (tanto por linha inteira quanto pelas chaves compostas de mês e município) retornaram zero. Como o arquivo do PIX não traz transações individuais, mas sim totais mensais por cidade, foi necessário criar uma chave composta unindo o mês (AnoMes) e o código da cidade (Municipio_Ibge). A contagem por linha inteira verifica se existem cópias exatas na base (onde todas as colunas são idênticas), enquanto a verificação pela chave procura registros com conteúdos conflitantes apontando para o mesmo município no mesmo mês. Como ambas retornaram zero, isso indica que a API do Banco Central forneceu um conjunto idempotente e que o processo de extração não gerou registros espelhos nem conflito de conteúdo.
+As contagens de duplicatas (tanto por linha inteira quanto pelas chaves compostas de mês e município) retornaram zero. Como o arquivo do PIX não traz transações individuais, mas sim totais mensais por cidade, foi necessário criar uma chave composta unindo o mês (AnoMes) e o código da cidade (Municipio_Ibge). A contagem por linha inteira verifica se existem cópias exatas na base (onde todas as colunas são idênticas), enquanto a verificação pela chave procura registros com conteúdos conflitantes apontando para o mesmo município no mesmo mês. Como ambas retornaram zero, isso indica que a API do Banco Central forneceu um conjunto idempotente e que o processo de extração não gerou registros espelhos nem conflito de conteúdo. A remoção vem aqui, antes de qualquer estatística calculada por município, como a mediana da Seção 3.
 
 ```{python}
 # | label: dedup
@@ -213,6 +120,8 @@ assert df.groupby("AnoMes").size().nunique() == 1, "algum mês tem número difer
 ```
 
 ## 3. Tabela de decisão
+
+### 3.1 Ausências
 
 ```{python}
 # | label: ausencia-por-coluna
@@ -241,22 +150,220 @@ FROM df
 
 Nenhuma das 19 colunas tem valor ausente, e nenhuma coluna de texto traz valor vazio. Mesmo sem ausências a tabela de decisão fica, porque a conclusão de 0% precisa estar sustentada por consulta e não só afirmada no texto. Sem ausência não há o que classificar entre MCAR, MAR e MNAR, nem estratégia de imputação a definir.
 
-| colunas | % ausente | tipo de ausência | estratégia | consulta que sustenta |
-|:---|---:|:---|:---|:---|
-| AnoMes, Municipio_Ibge | 0 | não se aplica | manter | célula `ausencia-por-coluna` (nulos = 0) e `contagem-exata` (24 meses, 217 municípios) |
-| Municipio, Estado, Estado_Ibge, Sigla_Regiao, Regiao | 0 | não se aplica | manter | célula `ausencia-por-coluna` (nulos = 0) e `texto-vazio` (nenhum vazio) |
-| as 8 colunas VL_ e QT_ e as 4 colunas QT_PES_ | 0 | não se aplica | manter | célula `ausencia-por-coluna` (nulos = 0) |
+### 3.2 Valores extremos contra a série de cada município
+
+Comparar um valor com o estado todo não diz se ele é estranho para o município a que pertence. A medida usada aqui é a razão entre o valor do mês e a mediana do mesmo município nos 24 meses. Como a série do Pix cresce com o tempo, a razão sozinha não decide nada: ela sinaliza, e o contexto decide.
+
+```{python}
+# | label: extremos-varredura
+# As 12 colunas numéricas (4 de valor, 4 de quantidade e 4 de pessoas distintas).
+colunas_num = [c for c in df.columns if c.startswith(("VL_", "QT_"))]
+
+# Razão de cada coluna à mediana do próprio município. Os trechos abaixo são
+# reaproveitados nas consultas seguintes.
+razoes_cte = (
+    "razoes AS (SELECT Municipio, AnoMes, "
+    + ", ".join(f"{c} / median({c}) OVER (PARTITION BY Municipio) AS r_{c}" for c in colunas_num)
+    + " FROM df)"
+)
+maior = "GREATEST(" + ", ".join(f"r_{c}" for c in colunas_num) + ")"
+
+partes = [
+    f"""SELECT '{c}' AS coluna,
+               count(*) FILTER (WHERE r > 2) AS acima_2x,
+               count(*) FILTER (WHERE r > 3) AS acima_3x,
+               count(*) FILTER (WHERE r > 5) AS acima_5x,
+               round(max(r), 1)              AS maior_razao
+        FROM (SELECT {c} / median({c}) OVER (PARTITION BY Municipio) AS r FROM df)"""
+    for c in colunas_num
+]
+con.sql(" UNION ALL ".join(partes) + " ORDER BY maior_razao DESC").df()
+```
+
+O quadro por coluna muda a leitura. As oito colunas de pessoa física e de pessoas distintas nunca passam de 2,5 vezes a mediana do município. As quatro colunas de pessoa jurídica, de valor e de quantidade, são outra coisa: VL_PagadorPJ tem 115 linhas acima de duas vezes a mediana, 33 acima de três e 8 acima de cinco, e a quantidade de transações PJ chega a 234 vezes a mediana. Como o volume total é dominado pela pessoa física, ele esconde essa volatilidade. A consulta abaixo olha só o volume total (pago mais recebido): apenas quatro pares município-mês passam de duas vezes a mediana, e foi daí que saíram os dois casos de Arame e de Santo Antônio dos Lopes que o professor apontou.
+
+```{python}
+# | label: extremos-volume-total
+# Só o volume total do mês (pago + recebido) contra a mediana do município.
+con.sql("""
+WITH base AS (
+    SELECT Municipio, AnoMes,
+           VL_PagadorPF + VL_PagadorPJ + VL_RecebedorPF + VL_RecebedorPJ AS vl_total
+    FROM df
+),
+razao AS (
+    SELECT Municipio, AnoMes,
+           round(vl_total / median(vl_total) OVER (PARTITION BY Municipio), 2) AS razao_vl_total
+    FROM base
+)
+SELECT * FROM razao WHERE razao_vl_total > 2 ORDER BY razao_vl_total DESC
+""").df()
+```
+
+Para não depender de uma única coluna, a regra de sinalização é: a linha é extrema quando qualquer uma das 12 colunas passa de cinco vezes a mediana do próprio município. O limiar de cinco foi escolhido porque nos limiares de duas e três vezes as colunas PJ sinalizam dezenas de linhas, que é variação comum de município pequeno e não permite separar nada.
+
+```{python}
+# | label: extremos-casos
+# As linhas que a regra sinaliza, com o padrão de cada uma:
+#  valor e quantidade: valor PJ e quantidade PJ sobem juntos
+#  só o valor: valor PJ sobe e a quantidade fica normal (poucas operações grandes)
+#  só a quantidade: a quantidade sobe e o valor fica normal
+con.sql(f"""
+WITH {razoes_cte}
+SELECT Municipio, AnoMes,
+       round(GREATEST(r_VL_PagadorPJ, r_VL_RecebedorPJ), 1) AS razao_valor_pj,
+       round(GREATEST(r_QT_PagadorPJ, r_QT_RecebedorPJ), 1) AS razao_qtd_pj,
+       CASE WHEN GREATEST(r_VL_PagadorPJ, r_VL_RecebedorPJ) > 5
+                 AND GREATEST(r_QT_PagadorPJ, r_QT_RecebedorPJ) > 3 THEN 'valor e quantidade'
+            WHEN GREATEST(r_VL_PagadorPJ, r_VL_RecebedorPJ) > 5      THEN 'só o valor'
+            ELSE 'só a quantidade' END AS padrao
+FROM razoes
+WHERE {maior} > 5
+ORDER BY padrao, AnoMes, Municipio
+""").df()
+```
+
+A regra sinaliza 13 linhas de 9 municípios, 0,25% das 5.208. Elas se dividem em três padrões. Em duas linhas, as de Arame em junho e julho de 2025, valor e quantidade sobem juntos. Em nove linhas só o valor PJ sobe, com a quantidade de transações perto do normal (no máximo 1,8 vez a mediana). Em duas linhas, Pio XII em janeiro de 2024 e Jatobá em dezembro de 2025, só a quantidade sobe. Três municípios (Amapá do Maranhão, Godofredo Viana e Tuntum) aparecem no mesmo mês, outubro de 2025, com o mesmo padrão de só o valor, o que sugere uma causa comum e não falhas isoladas. Os dados não dizem qual é essa causa.
+
+```{python}
+# | label: extremos-detalhe
+# Série de abril a dezembro de 2025 dos dois municípios apontados pelo professor,
+# em milhões de reais. ticket_medio_pj é o valor pago por PJ dividido pela
+# quantidade de transações.
+con.sql("""
+SELECT Municipio, AnoMes,
+       round((VL_PagadorPF + VL_PagadorPJ + VL_RecebedorPF + VL_RecebedorPJ) / 1e6, 1) AS vl_total_milhoes,
+       round(VL_PagadorPJ / 1e6, 1)             AS vl_pagador_pj_milhoes,
+       QT_PagadorPJ, QT_RecebedorPJ, QT_PES_PagadorPJ,
+       round(VL_PagadorPJ / QT_PagadorPJ, 2)    AS ticket_medio_pj
+FROM df
+WHERE Municipio IN ('ARAME', 'SANTO ANTÔNIO DOS LOPES')
+  AND AnoMes BETWEEN 202504 AND 202512
+ORDER BY Municipio, AnoMes
+""").df()
+```
+
+**Arame.** É o único município em que valor e quantidade sobem juntos. A quantidade paga por PJ vai de 14.840 em maio para 3.087.293 em junho e 1.581.052 em julho, e volta a 14.696 em agosto. A quantidade de pessoas jurídicas distintas quase não muda (273 em junho e 281 em julho), e as colunas de pessoa física ficam perto da mediana. O ticket médio do pagador PJ cai de cerca de R$ 1.570 em maio para R$ 95 em junho. São, portanto, milhões de transações pequenas feitas pelas mesmas empresas durante dois meses, e depois o padrão volta ao normal. Isso não parece erro de captura: um erro de escala, como o ponto decimal perdido que a aula-4 mostra, multiplicaria só o valor, e aqui a quantidade também sobe. O dado não diz a causa. Lembrando que o município é o do cadastro e não o da transação, uma hipótese é uma empresa com sede em Arame que fez muitos pagamentos pequenos nesses dois meses, mas é só hipótese e não conseguimos confirmar com este dado.
+
+**Santo Antônio dos Lopes.** É o padrão de só o valor. Em dezembro de 2025 o volume sobe (R$ 383,1 milhões, contra uma mediana próxima de R$ 125 milhões) com a quantidade de transações PJ quase igual à dos meses anteriores (razão de 1,6). O valor pago por PJ passa de R$ 8,3 milhões em novembro para R$ 117,0 milhões em dezembro, e o ticket médio vai de cerca de R$ 560 para R$ 6.940. Maio de 2025 também é sinalizado, com o mesmo padrão. O quadro é de uma série em que poucas operações PJ de valor alto fazem o volume oscilar muito de um mês para outro, sem mudança na quantidade de transações. Tratamos como fato, não como erro.
+
+Dos outros sete municípios, cinco seguem o padrão de Santo Antônio dos Lopes, só o valor, e dois (Pio XII e Jatobá) têm só a quantidade alta, com o valor normal, o que faz o ticket médio cair e é compatível com muitas transações pequenas. Em nenhum dos sete há sinal de formato ou de escala errados: não há valor negativo nem texto no lugar de número (o contrato barra os dois), e, fora de Arame, nenhuma razão passa de 9 vezes a mediana. Como em Arame, o dado não permite dizer a causa.
+
+#### 3.2.1 Efeito na pergunta analítica
+
+A pergunta do grupo é quais municípios tiveram as maiores variações do saldo relativo entre 2024 e 2025. Os extremos importam porque municípios pequenos e voláteis são justamente os candidatos a aparecer no topo desse ranking. A consulta abaixo recalcula a variação de cada município com todas as linhas e sem as 13 sinalizadas.
+
+```{python}
+# | label: extremos-efeito-resumo
+# Saldo relativo anual = (recebido - pago) / (recebido + pago).
+# variação = saldo de 2025 menos saldo de 2024. "sem" tira as 13 linhas sinalizadas.
+def anual(onde):
+    return f"""
+    SELECT d.Municipio, d.AnoMes // 100 AS ano,
+           sum(d.VL_RecebedorPF + d.VL_RecebedorPJ) AS rec,
+           sum(d.VL_PagadorPF   + d.VL_PagadorPJ)   AS pag
+    FROM df d LEFT JOIN marcadas m USING (Municipio, AnoMes)
+    {onde}
+    GROUP BY 1, 2"""
+
+def variacao(tabela, nome):
+    return f"""
+    {nome} AS (
+      SELECT Municipio,
+             max((rec - pag) / (rec + pag)) FILTER (WHERE ano = 2025)
+           - max((rec - pag) / (rec + pag)) FILTER (WHERE ano = 2024) AS var_{nome}
+      FROM {tabela} GROUP BY 1)"""
+
+sql_efeito = f"""
+WITH {razoes_cte},
+marcadas AS (SELECT Municipio, AnoMes FROM razoes WHERE {maior} > 5),
+anual_com AS ({anual('')}),
+anual_sem AS ({anual('WHERE m.Municipio IS NULL')}),
+{variacao('anual_com', 'com')},
+{variacao('anual_sem', 'sem')},
+j AS (
+  SELECT com.Municipio, var_com, var_sem,
+         rank() OVER (ORDER BY abs(var_com) DESC) AS posicao_com,
+         rank() OVER (ORDER BY abs(var_sem) DESC) AS posicao_sem
+  FROM com JOIN sem USING (Municipio))
+"""
+
+con.sql(sql_efeito + """
+SELECT count(*) FILTER (WHERE var_com * var_sem < 0)                AS municipios_com_sinal_invertido,
+       count(*) FILTER (WHERE posicao_com <= 10 AND posicao_sem > 10) AS saem_do_top10,
+       count(*) FILTER (WHERE posicao_sem <= 10 AND posicao_com > 10) AS entram_no_top10
+FROM j
+""").df()
+```
+
+```{python}
+# | label: extremos-efeito-tabela
+# Os 9 municípios com linha sinalizada: variação e posição no ranking de
+# maior variação em módulo, com todas as linhas e sem as sinalizadas.
+con.sql(sql_efeito + """
+SELECT Municipio,
+       round(var_com, 4) AS variacao_com, posicao_com,
+       round(var_sem, 4) AS variacao_sem, posicao_sem
+FROM j
+WHERE Municipio IN (SELECT Municipio FROM marcadas)
+ORDER BY posicao_com
+""").df()
+```
+
+Tirar as 13 linhas muda a resposta em três pontos. Dois municípios invertem o sinal da variação: Arame, de +0,0018 para -0,0041, e Benedito Leite, de -0,0188 para +0,0652, que passa do 32º lugar para o 4º só com a retirada de duas linhas. O top 10 troca um nome: sai Igarapé do Meio e entra Benedito Leite. E três dos quatro primeiros colocados têm linha sinalizada: Graça Aranha (1º), Jatobá (3º) e Santo Antônio dos Lopes (4º), embora a posição deles quase não mude sem as linhas. Esse é um resultado de sensibilidade, não o valor correto de cada município.
+
+**Decisão.** As 13 linhas ficam no dado, sem alteração e sem remoção, e ganham uma coluna indicadora (extremo_serie_municipio, criada na Seção 4). Não há regra conhecida que corrija um valor, e nada indica erro de formato ou de escala. O limite dessa conclusão é que, com os dados que temos, não dá para separar um fato real de uma falha na origem: só dá para dizer que não há sinal de erro de captura. Por isso a Etapa 2 precisa apresentar o ranking com e sem essas linhas, e o indicador existe para isso.
+
+### 3.3 Coerência entre colunas
+
+```{python}
+# | label: coerencia-colunas
+con.sql("""
+SELECT
+  count(*) FILTER (WHERE QT_PagadorPF   < QT_PES_PagadorPF)   AS viola_pagador_pf,
+  count(*) FILTER (WHERE QT_PagadorPJ   < QT_PES_PagadorPJ)   AS viola_pagador_pj,
+  count(*) FILTER (WHERE QT_RecebedorPF < QT_PES_RecebedorPF) AS viola_recebedor_pf,
+  count(*) FILTER (WHERE QT_RecebedorPJ < QT_PES_RecebedorPJ) AS viola_recebedor_pj
+FROM df
+""").df()
+```
+
+Toda pessoa que aparece em uma coluna QT_PES_ fez pelo menos uma transação, então a quantidade de transações não pode ser menor que a de pessoas distintas. Essa regra não está na documentação do Bacen, é uma dedução do grupo. Ela vale para as 5.208 linhas, com zero violações nas quatro combinações, e vira regra de tabela no transform.py.
+
+### Resumo das decisões
+
+| achado | resultado da consulta | estratégia | consulta que sustenta |
+|:---|:---|:---|:---|
+| AnoMes, Municipio_Ibge | 0% ausente | manter | `ausencia-por-coluna` e `contagem-exata` (24 meses, 217 municípios) |
+| Municipio, Estado, Estado_Ibge, Sigla_Regiao, Regiao | 0% ausente, nenhum texto vazio | manter | `ausencia-por-coluna` e `texto-vazio` |
+| as 8 colunas VL_ e QT_ e as 4 colunas QT_PES_ | 0% ausente | manter | `ausencia-por-coluna` |
+| 13 linhas de 9 municípios com alguma coluna acima de 5 vezes a mediana do próprio município | 13 de 5.208 (0,25%), padrão de fato incomum e sem sinal de erro de escala | manter e marcar com a coluna indicadora `extremo_serie_municipio` | `extremos-varredura`, `extremos-casos`, `extremos-efeito-resumo` |
+| QT_ menor que QT_PES_ | 0 violações | manter, e a regra vai para o contrato | `coerencia-colunas` |
 
 ## 4. Tratamento
 
 ```{python}
 # | label: tratamento
-# Como a base não possui nulos nem erros a corrigir, aplicamos apenas a Higiene de Formato.
+# Decisão 1: manter as 13 linhas extremas e sinalizar. O indicador usa a mesma
+# regra da Seção 3 (alguma coluna acima de 5 vezes a mediana do próprio município)
+# e é calculado antes da conversão de AnoMes, que ainda é numérico aqui.
+extremas = con.sql(f"""
+WITH {razoes_cte}
+SELECT Municipio, AnoMes FROM razoes WHERE {maior} > 5
+""").df()
+chaves_extremas = set(zip(extremas["Municipio"], extremas["AnoMes"]))
+df["extremo_serie_municipio"] = [
+    (m, a) in chaves_extremas for m, a in zip(df["Municipio"], df["AnoMes"])
+]
 
-# 1. Convertendo AnoMes (int64) para datetime
+assert df["extremo_serie_municipio"].sum() == len(extremas), "o indicador não bate com a consulta"
+assert len(df) == conteudo["quantidade_registros"], "alguma linha foi removida: os extremos deveriam ser mantidos"
+
+# Decisão 2: higiene de formato, que vale para a base inteira.
+# 2a. Convertendo AnoMes (int64) para datetime
 df["AnoMes"] = pd.to_datetime(df["AnoMes"].astype(str), format="%Y%m")
 
-# 2. Arredondando os valores financeiros para 2 casas decimais
+# 2b. Arredondando os valores financeiros para 2 casas decimais
 colunas_financeiras = [
     "VL_PagadorPF", "VL_PagadorPJ",
     "VL_RecebedorPF", "VL_RecebedorPJ"
@@ -267,20 +374,20 @@ assert pd.api.types.is_datetime64_any_dtype(df["AnoMes"]), "AnoMes não virou da
 assert df["AnoMes"].notna().all(), "A conversão gerou datas nulas (NaT)"
 ```
 
-Como a base original não apresentou valores ausentes nem erros a corrigir, o tratamento limitou-se à higiene de formato, que ajusta a legibilidade do arquivo para a máquina sem alterar o que o dado afirma na realidade. A conversão da coluna AnoMes para datetime habilita cálculos e ordenações temporais precisas, enquanto o arredondamento financeiro corrige artefatos visuais de ponto flutuante, entregando dados tecnicamente padronizados e prontos para as próximas análises. Os quatro pares município-mês extremos da Seção 1 não foram alterados.
+São duas decisões. A primeira é manter as 13 linhas extremas e marcá-las: a coluna indicadora extremo_serie_municipio vale verdadeiro nelas e falso no resto, e os dois asserts garantem que o indicador bate com a consulta da Seção 3 e que nenhuma linha foi removida. A segunda é a higiene de formato, que ajusta a legibilidade do arquivo para a máquina sem alterar o que o dado afirma. Como ela vale para a base inteira, uma coluna indicadora não distinguiria nada, e os asserts cobrem o resultado: AnoMes virou data e nenhuma conversão gerou data nula. A conversão de AnoMes habilita cálculos e ordenações temporais precisas, e o arredondamento financeiro corrige artefatos visuais de ponto flutuante. Esse indicador existe só neste diagnóstico. Se a Etapa 2 precisar dele no trusted, o transform.py terá que criá-lo e declará-lo no contrato.
 
 ## 5. Perfil dos dados pós tratamento
 
 ```{python}
 # | label: perfil
-# Perfil dos dados pós higiene de formato, também em SQL
+# Perfil dos dados pós tratamento, também em SQL
 perfil = con.sql("SUMMARIZE SELECT * FROM df").df()
 perfil[["column_name", "column_type", "count", "approx_unique", "null_percentage", "min", "max"]]
 ```
 
 ## 6. Quarentena
 
-Nenhum registro foi separado. Os quatro pares município-mês extremos da Seção 1 foram classificados como fato incomum e mantidos, então não sobrou nenhum suspeito que o grupo não tenha conseguido classificar, e por isso não há arquivo de quarentena. A base mantém todas as suas linhas. Se na Etapa 2 o grupo decidir tirar Arame de junho e julho de 2025 de alguma análise, essa decisão deve ser feita na análise e registrada lá, sem apagar a linha do dado.
+Nenhum registro foi separado. As 13 linhas extremas da Seção 3 foram classificadas como fato incomum e mantidas, com a coluna indicadora, então não sobrou nenhum suspeito que o grupo não tenha conseguido classificar, e por isso não há arquivo de quarentena. A base mantém todas as suas linhas. Se na Etapa 2 o grupo decidir tirar essas linhas de alguma análise, a decisão deve ser feita na análise e registrada lá, usando o indicador, sem apagar a linha do dado.
 
 ## 7. Erro da imputação, por mascaramento
 
@@ -289,6 +396,6 @@ A avaliação de completude confirmou que o conjunto de dados não possui valore
 ## Fechamento
 
 1- O arquivo final entregue por este pipeline contém exclusivamente dados reais medidos e reportados pela origem, sem nenhuma estimativa, pois a completude total da base dispensou o uso de imputações.
-2- Caso algum valor tivesse sido estimado matematicamente para preencher ausências, a distinção para o leitor seria feita através da presença de colunas indicadoras booleanas criadas especificamente para marcar e rastrear as linhas alteradas.
-3- Como essas colunas não foram necessárias, todos os registros são os valores reportados pela fonte, sem alteração além da higiene de formato.
-4- A completude total não encerra o diagnóstico: quatro pares município-mês, dois de Arame e dois de Santo Antônio dos Lopes, foram sinalizados contra a própria série do município e mantidos, e o efeito de Arame na pergunta analítica está registrado na Seção 1 para a Etapa 2.
+2- Caso algum valor tivesse sido estimado matematicamente para preencher ausências, a distinção para o leitor seria feita através da presença de colunas indicadoras booleanas criadas especificamente para marcar e rastrear as linhas alteradas. A única coluna indicadora criada marca as 13 linhas extremas mantidas, e não indica estimativa.
+3- Como nada foi estimado, todos os registros são os valores reportados pela fonte, sem alteração além da higiene de formato.
+4- A completude total não encerra o diagnóstico: 13 linhas de 9 municípios foram sinalizadas contra a própria série do município e mantidas, e elas mudam o ranking da pergunta analítica (dois municípios invertem o sinal da variação e o top 10 troca um nome). A Etapa 2 deve apresentar o resultado com e sem essas linhas.
