@@ -1,5 +1,5 @@
 #Apenas o sistema do meu macos
-.DS_Store 
+.DS_Store
 
 # Segredos
 .env
@@ -24,3 +24,14 @@ diagnostico.html
 diagnostico_files/
 diagnostico.quarto_ipynb
 .quarto/
+
+/.quarto/
+**/*.quarto_ipynb
+
+# Camada gold, recriada pelo model.py
+data/gold/*
+
+# Documentos Quarto renderizados dentro de analises/
+analises/*.html
+analises/*_files/
+*.quarto_ipynb
