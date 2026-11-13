@@ -18,3 +18,9 @@ data/quarentena/*
 !data/trusted/.gitkeep
 !data/quarentena/.gitkeep
 
+
+# Gerados pelo quarto render (o professor renderiza de novo)
+diagnostico.html
+diagnostico_files/
+diagnostico.quarto_ipynb
+.quarto/
