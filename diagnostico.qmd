@@ -17,39 +17,62 @@ execute:
 ```{python}
 # | label: setup
 import json
+from pathlib import Path
+
+import duckdb
 import pandas as pd
 
 pd.set_option("display.width", 120)
 pd.set_option("display.max_columns", None)
 
-ARQUIVO = 'data/raw/pix_dados_abertos/2026-10-02/pix_municipios_maranhao.json'
+# O ingest.py grava numa pasta com a data em que rodou, então o caminho muda
+# a cada coleta e não pode ficar escrito à mão. Usamos a coleta mais recente.
+candidatos = sorted(Path("data/raw").glob("**/pix_municipios_maranhao.json"))
+if not candidatos:
+    raise FileNotFoundError(
+        "Nenhuma coleta em data/raw/. Rode antes: uv run python src/ingest.py"
+    )
+ARQUIVO = candidatos[-1]
 
 with open(ARQUIVO, 'r', encoding='utf-8') as f:
     conteudo = json.load(f)
 
 # Extraindo a lista de registros.
 df = pd.DataFrame(conteudo['registros'])
-print(f"Lidos {len(df)} registros da fonte: {conteudo['fonte']}")
+
+# O DuckDB enxerga o DataFrame df pelo nome, sem importar nada.
+con = duckdb.connect()
+print(f"Lidos {len(df)} registros de {ARQUIVO}")
+print(f"Fonte: {conteudo['fonte']}")
 ```
 
 ## 1. Perfil dos dados brutos
 
 ```{python}
 # | label: perfil-final
-# Tabela de diagnóstico dos dados em data/raw
-perfil = pd.DataFrame({
-    'column_type': df.dtypes.astype(str),
-    'count': df.count(), # Conta valores não-nulos
-    'approx_unique': df.nunique(),
-    'null_percentage': (df.isna().mean() * 100).round(2),
-    'min': df.apply(lambda x: x.dropna().min() if not x.dropna().empty else None),
-    'max': df.apply(lambda x: x.dropna().max() if not x.dropna().empty else None)
-}).reset_index().rename(columns={'index': 'column_name'})
-
+# Perfil dos dados em data/raw, feito em SQL com o SUMMARIZE do DuckDB
+perfil = con.sql("SUMMARIZE SELECT * FROM df").df()
 perfil[["column_name", "column_type", "count", "approx_unique", "null_percentage", "min", "max"]]
 ```
 
-O perfil do arquivo revela uma base estruturada e limpa, sem ausências de preenchimento (null_percentage igual a 0.0 em todas as colunas). O campo approx_unique da coluna Municipio registra exatamente 217 valores distintos, garantindo a cobertura total do estado do Maranhão, observados ao longo de 24 meses (de 202401 a 202512). As variáveis financeiras apresentam limites adequados: não há saldos negativos e os valores mínimos partem da casa das centenas de milhares, refletindo corretamente a magnitude de um volume financeiro agregado municipal. O principal ponto de atenção é a coluna AnoMes, que foi tipada como numérico (int64) e demandará conversão para formato de data nas etapas de transformação para habilitar ordenações e comparações temporais de forma correta. Além disso, as colunas financeiras deverão ser formatadas para duas casas decimais, corrigindo pequenas imprecisões de ponto flutuante.
+O perfil do arquivo revela uma base estruturada e limpa, sem ausências de preenchimento (null_percentage igual a 0.0 em todas as colunas). As variáveis financeiras apresentam limites adequados: não há saldos negativos e os valores mínimos partem da casa das centenas de milhares, o que é coerente com um volume financeiro agregado por município. O principal ponto de atenção é a coluna AnoMes, que foi tipada como numérico (BIGINT) e demandará conversão para formato de data nas etapas de transformação, para habilitar ordenações e comparações temporais de forma correta. Além disso, as colunas financeiras deverão ser formatadas para duas casas decimais, corrigindo pequenas imprecisões de ponto flutuante.
+
+O approx_unique do SUMMARIZE é uma estimativa e não deve ser lido como contagem. Para Municipio_Ibge ele mostra 183 e para Municipio mostra 233, dois números diferentes para a mesma coisa, que são os municípios do Maranhão. A contagem exata abaixo resolve a divergência.
+
+```{python}
+# | label: contagem-exata
+con.sql("""
+SELECT count(*)                       AS linhas,
+       count(DISTINCT Municipio_Ibge) AS municipios_pelo_codigo,
+       count(DISTINCT Municipio)      AS municipios_pelo_nome,
+       count(DISTINCT AnoMes)         AS meses,
+       min(AnoMes)                    AS primeiro_mes,
+       max(AnoMes)                    AS ultimo_mes
+FROM df
+""").df()
+```
+
+A contagem exata dá 217 municípios tanto pelo código quanto pelo nome, em 24 meses (de 202401 a 202512), o que garante a cobertura completa do estado.
 
 ```{python}
 # | label: validacao-extremos
@@ -64,7 +87,100 @@ print(f"Piso transacional: {min_municipio} (VL_RecebedorPJ: {min_valor})")
 print(f"Teto transacional: {max_municipio} (VL_PagadorPJ: {max_valor})")
 ```
 
-Aprofundando a validação de acurácia dos extremos revelados na tabela, o piso e o teto transacionais confirmam a coerência da base com a realidade econômica do estado. O valor financeiro mínimo da base (149416.79 na variável VL_RecebedorPJ) pertence a Bacurituba, um município de microporte com cerca de 5 mil habitantes, refletindo perfeitamente a sua baixa densidade comercial. No extremo oposto, o teto de pagamentos realizados por pessoas jurídicas (VL_PagadorPJ) atingiu a marca de 15215859998.389999 em São Luís. Esse limite máximo é plenamente justificável, refletindo com exatidão a concentração do principal polo econômico, industrial e de serviços do estado na capital. 
+O valor financeiro mínimo da base (149416.79 na variável VL_RecebedorPJ) pertence a Bacurituba, e o teto de pagamentos realizados por pessoas jurídicas (VL_PagadorPJ), de 15215859998.389999, pertence a São Luís. Esse cruzamento mostra que os extremos globais são plausíveis para a capital e para um município pequeno. Ele não mostra que cada valor está certo: um valor pode ser normal para São Luís e anormal para o município a que pertence. Por isso a checagem que importa compara cada município com a sua própria série, na subseção seguinte.
+
+### Extremos contra a própria série de cada município
+
+```{python}
+# | label: extremos-por-municipio
+# Razão entre o volume do mês (pago + recebido) e a mediana do mesmo município
+# nos 24 meses. O limiar de 2 vezes só sinaliza, quem decide é o contexto.
+# razao_qt_pj faz o mesmo com a quantidade de transações de pessoa jurídica.
+extremos = con.sql("""
+WITH base AS (
+    SELECT Municipio, AnoMes,
+           VL_PagadorPF + VL_PagadorPJ + VL_RecebedorPF + VL_RecebedorPJ AS vl_total,
+           QT_PagadorPJ + QT_RecebedorPJ                                 AS qt_pj
+    FROM df
+),
+razao AS (
+    SELECT Municipio, AnoMes,
+           round(vl_total / median(vl_total) OVER (PARTITION BY Municipio), 2) AS razao_vl,
+           round(qt_pj    / median(qt_pj)    OVER (PARTITION BY Municipio), 1) AS razao_qt_pj
+    FROM base
+)
+SELECT * FROM razao WHERE razao_vl > 2 ORDER BY razao_vl DESC
+""").df()
+extremos
+```
+
+Dos 5.208 pares município-mês, só quatro passam de duas vezes a mediana do próprio município, e dois passam de três vezes: Arame em junho de 2025 (3,51 vezes) e Santo Antônio dos Lopes em dezembro de 2025 (3,07 vezes). Os outros dois são Arame em julho de 2025 (2,34) e Santo Antônio dos Lopes em maio de 2025 (2,24). O limiar só sinaliza. Para decidir se cada caso é erro ou fato, olhamos a quantidade de transações junto com o valor.
+
+```{python}
+# | label: extremos-detalhe
+# Série de abril a dezembro de 2025 dos dois municípios, em milhões de reais.
+# ticket_medio_pj é o valor pago por PJ dividido pela quantidade de transações.
+con.sql("""
+SELECT Municipio, AnoMes,
+       round((VL_PagadorPF + VL_PagadorPJ + VL_RecebedorPF + VL_RecebedorPJ) / 1e6, 1) AS vl_total_milhoes,
+       round(VL_PagadorPJ / 1e6, 1)             AS vl_pagador_pj_milhoes,
+       QT_PagadorPJ, QT_RecebedorPJ, QT_PES_PagadorPJ,
+       round(VL_PagadorPJ / QT_PagadorPJ, 2)    AS ticket_medio_pj
+FROM df
+WHERE Municipio IN ('ARAME', 'SANTO ANTÔNIO DOS LOPES')
+  AND AnoMes BETWEEN 202504 AND 202512
+ORDER BY Municipio, AnoMes
+""").df()
+```
+
+**Arame.** O volume sobe junto com a quantidade de transações de pessoa jurídica. A quantidade paga por PJ vai de 14.840 em maio para 3.087.293 em junho e 1.581.052 em julho, e volta a 14.696 em agosto. A quantidade de pessoas jurídicas distintas quase não muda (273 em junho e 281 em julho), e as colunas de pessoa física ficam perto da mediana. O ticket médio do pagador PJ cai de cerca de R$ 1.570 em maio para R$ 95 em junho. São, portanto, milhões de transações pequenas feitas pelas mesmas empresas durante dois meses, e depois o padrão volta ao normal. Isso não parece erro de captura: um erro de escala, como o ponto decimal perdido que a aula-4 mostra, multiplicaria só o valor, e aqui a quantidade também sobe. O dado não diz a causa. Lembrando que o município é o do cadastro e não o da transação, uma hipótese é uma empresa com sede em Arame que fez muitos pagamentos pequenos nesses dois meses, mas é só hipótese e não conseguimos confirmar com este dado.
+
+**Santo Antônio dos Lopes.** O caso é diferente. Em dezembro de 2025 o volume sobe (R$ 383,1 milhões, contra uma mediana próxima de R$ 125 milhões) com a quantidade de transações PJ quase igual à dos meses anteriores (razão de 1,6). O valor pago por PJ passa de R$ 8,3 milhões em novembro para R$ 117,0 milhões em dezembro, e o ticket médio vai de cerca de R$ 560 para R$ 6.940. Maio, julho e dezembro de 2025 mostram o mesmo padrão, o que indica uma série em que poucas operações PJ de valor alto fazem o volume oscilar muito de um mês para outro, sem mudança na quantidade de transações. Tratamos como fato, não como erro.
+
+```{python}
+# | label: extremos-efeito-saldo
+# Efeito dos dois meses de Arame no saldo relativo anual, que é a medida da
+# pergunta analítica: (recebido - pago) / (recebido + pago).
+con.sql("""
+WITH a AS (
+    SELECT AnoMes,
+           VL_RecebedorPF + VL_RecebedorPJ AS rec,
+           VL_PagadorPF   + VL_PagadorPJ   AS pag
+    FROM df WHERE Municipio = 'ARAME'
+),
+r AS (
+    SELECT '2024' AS recorte, rec, pag FROM a WHERE AnoMes BETWEEN 202401 AND 202412
+    UNION ALL
+    SELECT '2025 completo', rec, pag FROM a WHERE AnoMes BETWEEN 202501 AND 202512
+    UNION ALL
+    SELECT '2025 sem jun e jul', rec, pag FROM a
+    WHERE AnoMes BETWEEN 202501 AND 202512 AND AnoMes NOT IN (202506, 202507)
+)
+SELECT recorte,
+       round((sum(rec) - sum(pag)) / (sum(rec) + sum(pag)), 4) AS saldo_relativo
+FROM r GROUP BY recorte ORDER BY recorte
+""").df()
+```
+
+Esse caso importa para a pergunta do grupo. O saldo relativo de Arame é -0,0150 em 2024 e -0,0133 em 2025, uma variação de +0,0017. Sem junho e julho de 2025, o valor de 2025 seria -0,0192 e a variação seria de -0,0042, com o sinal trocado. Na Etapa 2, a variação de Arame precisa ser apresentada com e sem esses dois meses.
+
+**Decisão.** Os quatro pares município-mês ficam no dado, sem alteração e sem remoção. Não há regra conhecida que corrija um valor, e nada indica erro de formato ou de escala. O limite dessa conclusão é que, com os dados que temos, não dá para separar um fato real de uma falha na origem: só dá para dizer que não há sinal de erro de captura.
+
+### Coerência entre colunas
+
+```{python}
+# | label: coerencia-colunas
+con.sql("""
+SELECT
+  count(*) FILTER (WHERE QT_PagadorPF   < QT_PES_PagadorPF)   AS viola_pagador_pf,
+  count(*) FILTER (WHERE QT_PagadorPJ   < QT_PES_PagadorPJ)   AS viola_pagador_pj,
+  count(*) FILTER (WHERE QT_RecebedorPF < QT_PES_RecebedorPF) AS viola_recebedor_pf,
+  count(*) FILTER (WHERE QT_RecebedorPJ < QT_PES_RecebedorPJ) AS viola_recebedor_pj
+FROM df
+""").df()
+```
+
+Toda pessoa que aparece em uma coluna QT_PES_ fez pelo menos uma transação, então a quantidade de transações não pode ser menor que a de pessoas distintas. Essa regra não está na documentação do Bacen, é uma dedução do grupo. Ela vale para as 5.208 linhas, com zero violações nas quatro combinações, e vira regra de tabela no transform.py.
 
 ## 2. Duplicatas
 
@@ -72,12 +188,13 @@ Aprofundando a validação de acurácia dos extremos revelados na tabela, o piso
 # | label: duplicatas
 CHAVE = ["AnoMes", "Municipio_Ibge"]
 
-dup_linha = int(df.duplicated().sum())
-dup_chave = int(df.duplicated(subset=CHAVE).sum())
-
-print(f"linhas: {len(df)}")
-print(f"duplicadas por linha inteira: {dup_linha}")
-print(f"duplicadas por chaves ({CHAVE}): {dup_chave}")
+# Contagem exata em SQL, pela chave e pela linha inteira.
+con.sql("""
+SELECT count(*) AS linhas,
+       count(*) - count(DISTINCT (AnoMes, Municipio_Ibge))      AS repetidas_pela_chave,
+       count(*) - (SELECT count(*) FROM (SELECT DISTINCT * FROM df)) AS repetidas_linha_inteira
+FROM df
+""").df()
 ```
 
 As contagens de duplicatas (tanto por linha inteira quanto pelas chaves compostas de mês e município) retornaram zero. Como o arquivo do PIX não traz transações individuais, mas sim totais mensais por cidade, foi necessário criar uma chave composta unindo o mês (AnoMes) e o código da cidade (Municipio_Ibge). A contagem por linha inteira verifica se existem cópias exatas na base (onde todas as colunas são idênticas), enquanto a verificação pela chave procura registros com conteúdos conflitantes apontando para o mesmo município no mesmo mês. Como ambas retornaram zero, isso indica que a API do Banco Central forneceu um conjunto idempotente e que o processo de extração não gerou registros espelhos nem conflito de conteúdo.
@@ -86,37 +203,62 @@ As contagens de duplicatas (tanto por linha inteira quanto pelas chaves composta
 # | label: dedup
 antes = len(df)
 df = df.drop_duplicates(subset=CHAVE).reset_index(drop=True)
-print(f"{antes} -> {len(df)} linhas apos remover cópias exatas")
+print(f"{antes} -> {len(df)} linhas apos remover repetidas")
 
-assert len(df) == 5208, "contagem apos dedup mudou"
+# Os asserts não dependem de um número fixo: o total tem que bater com o que
+# o ingest.py registrou no envelope, e todo mês tem que ter o mesmo número de
+# municípios.
+assert len(df) == conteudo["quantidade_registros"], "contagem apos dedup mudou"
+assert df.groupby("AnoMes").size().nunique() == 1, "algum mês tem número diferente de municípios"
 ```
-
-
 
 ## 3. Tabela de decisão
 
 ```{python}
 # | label: ausencia-por-coluna
-ausencia = (df.isna().mean() * 100).round(1)
-ausencia[ausencia > 0].sort_values(ascending=False).to_frame("pct_nulo")
+# Ausentes por coluna, contados em SQL: count(*) conta as linhas e
+# count(coluna) conta só as preenchidas.
+partes = [
+    f"SELECT '{c}' AS coluna, count(*) - count({c}) AS nulos, "
+    f"round(100.0 * (count(*) - count({c})) / count(*), 2) AS pct_ausente FROM df"
+    for c in df.columns
+]
+ausencia = con.sql(" UNION ALL ".join(partes)).df()
+ausencia
 ```
 
-A avaliação de dados faltantes confirmou o perfil inicial: não existem valores nulos no conjunto analisado. O bloco de diagnóstico acima retornou um resultado vazio, comprovando que todas as colunas possuem preenchimento completo.
-Conforme as recomendações do projeto de que um dado limpo e medido não exige correções artificiais, observamos a qualidade da base. Sem lacunas para investigar, torna-se desnecessário aplicar consultas de agrupamento, classificar mecanismos nas categorias de Rubin (MCAR, MAR, MNAR) ou definir estratégias de imputação em uma tabela de decisão.
+```{python}
+# | label: texto-vazio
+# Texto vazio não aparece como nulo, então checamos à parte.
+con.sql("""
+SELECT count(*) FILTER (WHERE trim(Municipio)    = '') AS municipio_vazio,
+       count(*) FILTER (WHERE trim(Estado)       = '') AS estado_vazio,
+       count(*) FILTER (WHERE trim(Regiao)       = '') AS regiao_vazia,
+       count(*) FILTER (WHERE trim(Sigla_Regiao) = '') AS sigla_vazia
+FROM df
+""").df()
+```
 
+Nenhuma das 19 colunas tem valor ausente, e nenhuma coluna de texto traz valor vazio. Mesmo sem ausências a tabela de decisão fica, porque a conclusão de 0% precisa estar sustentada por consulta e não só afirmada no texto. Sem ausência não há o que classificar entre MCAR, MAR e MNAR, nem estratégia de imputação a definir.
+
+| colunas | % ausente | tipo de ausência | estratégia | consulta que sustenta |
+|:---|---:|:---|:---|:---|
+| AnoMes, Municipio_Ibge | 0 | não se aplica | manter | célula `ausencia-por-coluna` (nulos = 0) e `contagem-exata` (24 meses, 217 municípios) |
+| Municipio, Estado, Estado_Ibge, Sigla_Regiao, Regiao | 0 | não se aplica | manter | célula `ausencia-por-coluna` (nulos = 0) e `texto-vazio` (nenhum vazio) |
+| as 8 colunas VL_ e QT_ e as 4 colunas QT_PES_ | 0 | não se aplica | manter | célula `ausencia-por-coluna` (nulos = 0) |
 
 ## 4. Tratamento
 
 ```{python}
 # | label: tratamento
-# Como a base não possui nulos ou outliers, aplicamos apenas a Higiene de Formato.
+# Como a base não possui nulos nem erros a corrigir, aplicamos apenas a Higiene de Formato.
 
 # 1. Convertendo AnoMes (int64) para datetime
 df["AnoMes"] = pd.to_datetime(df["AnoMes"].astype(str), format="%Y%m")
 
 # 2. Arredondando os valores financeiros para 2 casas decimais
 colunas_financeiras = [
-    "VL_PagadorPF", "VL_PagadorPJ", 
+    "VL_PagadorPF", "VL_PagadorPJ",
     "VL_RecebedorPF", "VL_RecebedorPJ"
 ]
 df[colunas_financeiras] = df[colunas_financeiras].round(2)
@@ -125,28 +267,20 @@ assert pd.api.types.is_datetime64_any_dtype(df["AnoMes"]), "AnoMes não virou da
 assert df["AnoMes"].notna().all(), "A conversão gerou datas nulas (NaT)"
 ```
 
-Como a base original não apresentou valores ausentes ou extremos, o tratamento limitou-se à higiene de formato, que ajusta a legibilidade do arquivo para a máquina sem alterar o que o dado afirma na realidade. A conversão da coluna AnoMes para datetime habilita cálculos e ordenações temporais precisas, enquanto o arredondamento financeiro corrige artefatos visuais de ponto flutuante, entregando dados tecnicamente padronizado e pronto para as próximas análises. 
+Como a base original não apresentou valores ausentes nem erros a corrigir, o tratamento limitou-se à higiene de formato, que ajusta a legibilidade do arquivo para a máquina sem alterar o que o dado afirma na realidade. A conversão da coluna AnoMes para datetime habilita cálculos e ordenações temporais precisas, enquanto o arredondamento financeiro corrige artefatos visuais de ponto flutuante, entregando dados tecnicamente padronizados e prontos para as próximas análises. Os quatro pares município-mês extremos da Seção 1 não foram alterados.
 
 ## 5. Perfil dos dados pós tratamento
 
 ```{python}
 # | label: perfil
-# Tabela de diagnóstico dos dados pós higiene de formato
-perfil = pd.DataFrame({
-    'column_type': df.dtypes.astype(str),
-    'count': df.count(), # Conta valores não-nulos
-    'approx_unique': df.nunique(),
-    'null_percentage': (df.isna().mean() * 100).round(2),
-    'min': df.apply(lambda x: x.dropna().min() if not x.dropna().empty else None),
-    'max': df.apply(lambda x: x.dropna().max() if not x.dropna().empty else None)
-}).reset_index().rename(columns={'index': 'column_name'})
-
+# Perfil dos dados pós higiene de formato, também em SQL
+perfil = con.sql("SUMMARIZE SELECT * FROM df").df()
 perfil[["column_name", "column_type", "count", "approx_unique", "null_percentage", "min", "max"]]
 ```
 
 ## 6. Quarentena
 
-A etapa de perfilamento não identificou valores impossíveis, erros de formatação ou distorções suspeitas nos dados numéricos, visto que todos os limites financeiros refletem volumes de transação agregados coerentes. Como não há nenhum registro suspeito que o grupo não conseguiu classificar, nenhum dado precisou ser apartado, o que elimina a necessidade de gerar um arquivo de quarentena. A base mantém todas as suas linhas originais íntegras, em conformidade com a recomendação de que o dado verificado como limpo não exige intervenções artificiais.
+Nenhum registro foi separado. Os quatro pares município-mês extremos da Seção 1 foram classificados como fato incomum e mantidos, então não sobrou nenhum suspeito que o grupo não tenha conseguido classificar, e por isso não há arquivo de quarentena. A base mantém todas as suas linhas. Se na Etapa 2 o grupo decidir tirar Arame de junho e julho de 2025 de alguma análise, essa decisão deve ser feita na análise e registrada lá, sem apagar a linha do dado.
 
 ## 7. Erro da imputação, por mascaramento
 
@@ -154,7 +288,7 @@ A avaliação de completude confirmou que o conjunto de dados não possui valore
 
 ## Fechamento
 
-
 1- O arquivo final entregue por este pipeline contém exclusivamente dados reais medidos e reportados pela origem, sem nenhuma estimativa, pois a completude total da base dispensou o uso de imputações.
 2- Caso algum valor tivesse sido estimado matematicamente para preencher ausências, a distinção para o leitor seria feita através da presença de colunas indicadoras booleanas criadas especificamente para marcar e rastrear as linhas alteradas.
-3- Como essas colunas não foram necessárias,100% dos registros representam o fenômeno original, tendo passado apenas por adequações de higiene de formato.
+3- Como essas colunas não foram necessárias, todos os registros são os valores reportados pela fonte, sem alteração além da higiene de formato.
+4- A completude total não encerra o diagnóstico: quatro pares município-mês, dois de Arame e dois de Santo Antônio dos Lopes, foram sinalizados contra a própria série do município e mantidos, e o efeito de Arame na pergunta analítica está registrado na Seção 1 para a Etapa 2.
