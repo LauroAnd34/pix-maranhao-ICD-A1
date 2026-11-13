@@ -43,11 +43,14 @@ uv run python src/transform.py
   endpoint, filtro, meses coletados, e a lista de registros sem alteração)
   em `data/raw/pix_dados_abertos/AAAA-MM-DD/pix_municipios_maranhao.json` —
   uma pasta por data de coleta, como pede a aula-3. Idempotente: se o
-  arquivo de hoje já existe, a segunda execução não refaz a coleta.
+  arquivo de hoje já existe, a segunda execução não refaz a coleta. Se algum mês falhar, nada é gravado e o
+  script sai com erro, para que uma coleta parcial não bloqueie a reexecução.
   Testado de verdade contra a API: **5.208 registros** (217 municípios × 24
   meses), coleta 24/24 meses sem falha.
 
-- **`src/transform.py`** — lê os JSONs da pasta raw, aplica o Contrato Pandera garantindo a tipagem das colunas financeiras e geográficas, e cria a métrica da Pergunta Analítica (o *saldo relativo*). Como política, adotou-se o Fail-Stop, visto que a base bruta foi provada 100% íntegra (0 nulos). O pipeline grava o arquivo final tipado e otimizado em `data/trusted/pix_maranhao_trusted.parquet`. A pasta `data/quarentena/` é recriada para cumprir o pipeline, mas permanece vazia.
+- **`diagnostico.qmd`** — lê a coleta mais recente de `data/raw/` e diagnostica o dado bruto em SQL (DuckDB): perfil com `SUMMARIZE`, duplicatas, ausências por coluna (tabela de decisão com a consulta que sustenta cada conclusão) e extremos de cada município contra a própria série. O dado veio sem nulos e sem duplicatas. Os dois casos mais extremos (Arame em jun/2025 e Santo Antônio dos Lopes em dez/2025) foram analisados e mantidos, com a conclusão e o efeito no saldo relativo descritos no notebook.
+
+- **`src/transform.py`** — lê a coleta mais recente em `data/raw/` e aplica o contrato Pandera (`strict` e `coerce`), com o tipo e a faixa de cada coluna, a chave única (`AnoMes`, `Municipio_Ibge`) e duas regras de tabela entre colunas: o volume total do município-mês é maior que zero, e a quantidade de transações nunca é menor que a de pessoas distintas. Depois calcula o *saldo relativo* e grava `data/trusted/pix_maranhao_trusted.parquet`. A política é Fail-Stop: se qualquer linha violar o contrato, o pipeline para, mostra o resumo por motivo e não grava nada, porque um relatório feito sobre uma base desfalcada é pior que um pipeline parado. Na coleta atual ele aprovou as 5.208 linhas e rejeitou 0, mas isso é o resultado desta coleta e não uma garantia: a política vale enquanto a fonte se mantiver estável. A pasta `data/quarentena/` é criada pelo pipeline e fica vazia, porque no Fail-Stop nenhuma linha é desviada para ela.
 
 
 
