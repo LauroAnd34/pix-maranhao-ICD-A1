@@ -1,0 +1,484 @@
+---
+title: "Exploração do dado - Pix por municípios - Maranhão"
+subtitle: "Introdução à Ciência de Dados"
+author: "Lauro Andrade(Matrícula: 20231SI0024) Paulo André (20231SI0021) e Raquel Coelho (20231SI0018)"
+date: today
+version: "1.1.1"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    code-fold: false
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+---
+
+# Preparação: o recorte da exploração
+
+A exploração usará apenas os dados de janeiro de 2024 a junho de 2025. O segundo semestre de 2025 (julho a dezembro) ficará guardado para a confirmação de hipóteses na próxima etapa e **não será olhado aqui**.
+
+```{python}
+#| label: setup
+from pathlib import Path
+import duckdb
+import numpy as np
+import plotly.express as px
+
+ANOS_EXPLORACAO = (2024,)  # 2025 fica guardado para a confirmação na Etapa 3
+
+# Encontra a raiz do projeto (procura a pasta 'data' no diretório atual ou no pai)
+ROOT = Path.cwd() if (Path.cwd() / "data").exists() else Path.cwd().parent
+PARQUET_PATH = (ROOT / "data" / "trusted" / "pix_maranhao_trusted.parquet").as_posix()
+
+con = duckdb.connect()
+
+con.execute(f"""
+    CREATE VIEW pix AS
+    SELECT
+        *,
+        YEAR(AnoMes) AS ano,
+        MONTH(AnoMes) AS mes,
+        (VL_RecebedorPF + VL_RecebedorPJ) AS valor_recebido,
+        (VL_PagadorPF + VL_PagadorPJ) AS valor_pago,
+        (VL_RecebedorPF + VL_RecebedorPJ + VL_PagadorPF + VL_PagadorPJ) AS volume_total,
+        (QT_RecebedorPF + QT_RecebedorPJ + QT_PagadorPF + QT_PagadorPJ) AS qt_total
+    FROM '{PARQUET_PATH}'
+    WHERE YEAR(AnoMes) IN {ANOS_EXPLORACAO}
+""")
+
+# Trava de segurança: garante que 2025 não vazou para a exploração
+anos_vistos = sorted(a for (a,) in con.sql("SELECT DISTINCT ano FROM pix").fetchall())
+assert anos_vistos == sorted(ANOS_EXPLORACAO), f"o recorte deixou passar {anos_vistos}"
+anos_vistos
+```
+
+# Bloco 1: perguntas e expectativas
+
+| # | Pergunta analítica | Colunas | Expectativa, escrita antes de olhar |
+|:--|:-----------------|:--------------|:-------------------------|
+| P1 | O saldo relativo varia conforme o volume financeiro do município? | `volume_total`, `saldo_relativo` |Sim, municípios com maior volume financeiro têm saldo relativo mais positivo. |
+| P2 | O saldo relativo muda ao longo dos meses do ano? | `AnoMes`, `saldo_relativo` |Não, o saldo relativo se mantém estável ao longo dos meses, mesmo que o volume suba no fim do ano. |
+| P3 | O valor recebido por empresas (VL_RecebedorPJ) anda junto com o saldo relativo? | `VL_RecebedorPJ`, `saldo_relativo` | Sim, municípios com maior valor recebido por PJ têm saldo relativo mais alto. |
+
+# Bloco 2: primeiro passo, cada coluna sozinha
+
+O primeiro passo da varredura percorre todas as colunas da camada `trusted` independentemente das perguntas. Na `trusted` não há nulos, pois o contrato recusa valores ausentes; além disso, como o pipeline adotou a política **Fail-Stop**, não existem colunas indicadoras de valores imputados ou corrigidos.
+
+## Perfil geral, categóricas constantes e colunas que aguardam pergunta
+
+Abaixo conferimos o tamanho do recorte de exploração (ano de 2024) e a quantidade de valores distintos das colunas categóricas.
+
+```{python}
+#| label: marcas-e-categoricas
+con.sql("""
+    SELECT
+        COUNT(*) AS n_linhas,
+        COUNT(DISTINCT Municipio_Ibge) AS n_municipios,
+        COUNT(DISTINCT AnoMes) AS n_meses,
+        COUNT(DISTINCT Estado) AS n_estados,
+        COUNT(DISTINCT Regiao) AS n_regioes,
+        COUNT(DISTINCT Sigla_Regiao) AS n_siglas_regiao
+    FROM pix
+""").df()
+```
+
+ As colunas Estado, Estado_Ibge, Regiao e Sigla_Regiao são constantes (possuem apenas 1 valor distinto, referente ao Maranhão/Nordeste) e, portanto, não formam grupos para gráficos de barras. Seguindo o protocolo da aula, as colunas de identificador (Municipio e Municipio_Ibge) e a coluna de data (AnoMes) não recebem gráficos univariados neste bloco e entram apenas nos próximos passos, quando as perguntas analíticas as exigirem.
+
+```{python}
+ #| label: checagem-zeros
+con.sql("""
+    SELECT
+        SUM(CASE WHEN VL_PagadorPF = 0 THEN 1 ELSE 0 END) AS zero_vl_pag_pf,
+        SUM(CASE WHEN VL_PagadorPJ = 0 THEN 1 ELSE 0 END) AS zero_vl_pag_pj,
+        SUM(CASE WHEN VL_RecebedorPF = 0 THEN 1 ELSE 0 END) AS zero_vl_rec_pf,
+        SUM(CASE WHEN VL_RecebedorPJ = 0 THEN 1 ELSE 0 END) AS zero_vl_rec_pj,
+        SUM(CASE WHEN QT_PagadorPF = 0 THEN 1 ELSE 0 END) AS zero_qt_pag_pf,
+        SUM(CASE WHEN QT_PagadorPJ = 0 THEN 1 ELSE 0 END) AS zero_qt_pag_pj,
+        SUM(CASE WHEN QT_RecebedorPF = 0 THEN 1 ELSE 0 END) AS zero_qt_rec_pf,
+        SUM(CASE WHEN QT_RecebedorPJ = 0 THEN 1 ELSE 0 END) AS zero_qt_rec_pj
+    FROM pix
+""").df()
+```
+
+Antes de aplicar escala logarítmica nas variáveis financeiras e de quantidade, verificamos quantas linhas valem zero em cada coluna. 
+
+## Perfil geral numéricas
+
+### Saldo relativo
+```{python}
+#| label: forma-saldo-relativo
+saldo = con.sql("SELECT saldo_relativo FROM pix").df()
+
+for faixas in (30, 60):
+    px.histogram(
+        saldo, x="saldo_relativo", nbins=faixas,
+        title=f"Distribuição de saldo_relativo ({faixas} faixas)"
+    ).show()
+
+px.violin(saldo, x="saldo_relativo", box=True, title="Violino de saldo_relativo").show()
+```
+
+A distribuição é unimodal, concentrada ligeiramente abaixo de zero, com assimetria à esquerda e maior presença de valores negativos.
+
+### Volume total e colunas financeiras
+
+```{python}
+#| label: forma-financeiras
+fin = con.sql("""
+    SELECT volume_total, VL_PagadorPF, VL_PagadorPJ, VL_RecebedorPF, VL_RecebedorPJ
+    FROM pix
+""").df()
+
+vol_pos = fin.loc[fin["volume_total"] > 0, ["volume_total"]].copy()
+vol_pos["log10_volume_total"] = np.log10(vol_pos["volume_total"])
+for faixas in (30, 60):
+    px.histogram(
+        vol_pos, x="log10_volume_total", nbins=faixas,
+        title=f"log10(volume_total) — {faixas} faixas",
+        width=700, height=400
+    ).show()
+
+for col in ("VL_PagadorPF", "VL_PagadorPJ", "VL_RecebedorPF", "VL_RecebedorPJ"):
+    serie = fin.loc[fin[col] > 0, [col]].copy()
+    serie[f"log10_{col}"] = np.log10(serie[col])
+    px.histogram(
+        serie, x=f"log10_{col}", nbins=50,
+        title=f"log10({col}) — apenas valores > 0",
+        width=700, height=400
+    ).show()
+```
+Em escala logarítmica , o volume_total apresenta distribuição unimodal com pico bem definido entre 7,7 e 7,9 — forma que se mantém estável tanto com 30 quanto com 60 faixas — e cauda longa à direita, marcada por dois pequenos grupos isolados no extremo superior (entre 9,5 e 9,8 e acima de 10,3). As colunas de Pessoa Física (VL_PagadorPF e VL_RecebedorPF) exibem formatos praticamente idênticos, unimodais, com pico em torno de 7,5 e cauda à direita com poucas observações isoladas acima de 9,0. Já as colunas de Pessoa Jurídica (VL_PagadorPJ e VL_RecebedorPJ) também são unimodais e semelhantes entre si, porém deslocadas quase uma ordem de grandeza abaixo das de PF (pico próximo de 6,7), com maior dispersão e com os grupos isolados na ponta direita (próximos de 9 e 10) ainda mais destacados do corpo principal da distribuição. 
+
+### Quantidade de transações e pessoas
+```{python}
+#| label: forma-quantidades
+qts = con.sql("""
+    SELECT
+        QT_PagadorPF, QT_PagadorPJ, QT_RecebedorPF, QT_RecebedorPJ,
+        QT_PES_PagadorPF, QT_PES_PagadorPJ, QT_PES_RecebedorPF, QT_PES_RecebedorPJ
+    FROM pix
+""").df()
+
+for col in qts.columns:
+    serie = qts.loc[qts[col] > 0, [col]].copy()
+    serie[f"log10_{col}"] = np.log10(serie[col])
+    px.histogram(
+        serie, x=f"log10_{col}", nbins=50,
+        title=f"log10({col}) — apenas valores > 0"
+    ).show()
+```
+
+Em escala logarítmica, todas as colunas de transações (`QT_*`) e de pessoas distintas (`QT_PES_*`) repetem o formato das variáveis financeiras: distribuições unimodais com cauda longa à direita e pequenos grupos isolados no extremo superior. Em `QT_*`, os picos de PF ficam entre 5,2 e 5,5, enquanto PJ fica abaixo (em torno de 3,7 em pagador e 4,3 em recebedor). Em `QT_PES_*`, o comportamento se mantém, com picos entre 3,8 e 4,0 para PF e próximos de 2,2 para PJ.
+
+# Bloco 3: P1
+
+**Pergunta:** O saldo relativo varia conforme o volume financeiro do município?  
+**Expectativa:** Sim, municípios com maior volume financeiro têm saldo relativo mais positivo.
+
+## Duas colunas
+O saldo absoluto (Recebido - Pago) geral por município:
+
+```{python}
+#| label: p1-dispersao
+p1 = con.sql("""
+    SELECT Municipio, mes, volume_total, saldo_relativo
+    FROM pix
+""").df()
+
+px.scatter(
+    p1, x="volume_total", y="saldo_relativo",
+    log_x=True, opacity=0.45,
+    hover_data=["Municipio", "mes"],
+    title="Dispersão: volume_total (log) vs. saldo_relativo (2024)",
+    width=700, height=400
+).show()
+```
+
+A nuvem de pontos se concentra em uma faixa quase horizontal ligeiramente abaixo de zero, sem uma subida clara do `saldo_relativo` conforme o `volume_total` cresce. Os maiores desvios aparecem nos volumes intermediários (entre R$ 20 milhões e R$ 200 milhões), enquanto os maiores volumes à direita permanecem próximos ou abaixo de zero. Como cada município aparece 12 vezes no gráfico (visível nos pequenos agrupamentos à direita), o próximo passo deve agrupar os dados para que cada município conte uma única vez e comparar os quartis de volume.
+
+## Uma terceira coluna
+
+```{python}
+#| label: p1-por-municipio
+p1_mun = con.sql("""
+    SELECT
+        Municipio,
+        MEDIAN(volume_total) AS volume_mediano,
+        MEDIAN(saldo_relativo) AS saldo_mediano
+    FROM pix
+    GROUP BY Municipio
+""").df()
+
+px.scatter(
+    p1_mun, x="volume_mediano", y="saldo_mediano",
+    log_x=True,
+    hover_data=["Municipio"],
+    title="Um ponto por município: mediana do volume (log) vs. mediana do saldo relativo",
+    width=700, height=400
+).show()
+```
+
+```{python}
+#| label: p1-faixas-boxplot
+p1_faixas = con.sql("""
+    WITH mun_faixa AS (
+        SELECT
+            Municipio,
+            NTILE(4) OVER (ORDER BY MEDIAN(volume_total)) AS quartil_vol
+        FROM pix
+        GROUP BY Municipio
+    )
+    SELECT
+        p.Municipio,
+        p.saldo_relativo,
+        'Q' || m.quartil_vol AS faixa_volume
+    FROM pix p
+    JOIN mun_faixa m USING (Municipio)
+""").df()
+
+px.box(
+    p1_faixas, x="faixa_volume", y="saldo_relativo",
+    category_orders={"faixa_volume": ["Q1", "Q2", "Q3", "Q4"]},
+    title="Saldo relativo por quartil de volume financeiro do município (Q1 = menor, Q4 = maior)",
+    width=700, height=400
+).show()
+```
+Ao fazer cada município contar uma única vez pela mediana anual, o padrão se mantém: a grande maioria dos municípios permanece com `saldo_mediano` negativo , inclusive os maiores polos à direita. No boxplot por quartil de volume, todas as quatro caixas ficam abaixo de zero, mas nota-se um deslocamento gradual e discreto da mediana para cima de `Q1` até `Q4`, além de menos extremos negativos em `Q4` do que em `Q1` e `Q3`. A tabela cruzada a seguir mede o tamanho exato dessa diferença.
+
+## A tabela cruzada
+
+```{python}
+#| label: p1-cruzada
+con.sql("""
+    WITH mun_faixa AS (
+        SELECT
+            Municipio,
+            NTILE(4) OVER (ORDER BY MEDIAN(volume_total)) AS quartil_vol
+        FROM pix
+        GROUP BY Municipio
+    )
+    SELECT
+        'Q' || m.quartil_vol AS faixa_volume,
+        COUNT(DISTINCT p.Municipio) AS n_municipios,
+        COUNT(*) AS n_linhas,
+        ROUND(MEDIAN(p.volume_total) / 1e6, 3) AS vol_mediano_mi,
+        ROUND(MEDIAN(p.saldo_relativo), 3) AS saldo_mediano,
+        ROUND(AVG(p.saldo_relativo), 3) AS saldo_medio,
+        ROUND(100.0 * AVG(CASE WHEN p.saldo_relativo > 0 THEN 1 ELSE 0 END), 3) AS pct_positivo
+    FROM pix p
+    JOIN mun_faixa m USING (Municipio)
+    GROUP BY m.quartil_vol
+    ORDER BY m.quartil_vol
+""").df()
+```
+
+A expectativa **se sustentou em parte**. O `saldo_relativo` mediano sobe de forma contínua do menor ao maior quartil de volume — passando de -0,044 em `Q1` para -0,039 em `Q2`, -0,035 em `Q3` e -0,022 em `Q4` — e o percentual de meses com saldo positivo mais que triplica (de 5,455\% em `Q1` para 17,130\% em `Q4`). Contudo, mesmo no quartil de maior volume (`Q4`), a mediana permanece negativa. A rival de repetição de meses por município foi eliminada (o padrão se mantém com um ponto por município). Ficam pendentes o acaso, a estabilidade no tempo (2025) e a direção/causa (outras características ligadas ao porte, como a participação de PJ, investigada na P3).
+
+# Bloco 4: P2
+**Pergunta:** O saldo relativo muda ao longo dos meses do ano? 
+**Expectativa:** Não, o saldo relativo se mantém estável ao longo dos meses, mesmo que o volume suba no fim do ano.
+
+## Duas colunas
+
+```{python}
+#| label: p2-linha-mes
+p2_mes = con.sql("""
+    SELECT
+        mes,
+        MEDIAN(saldo_relativo) AS saldo_mediano,
+        AVG(saldo_relativo) AS saldo_medio
+    FROM pix
+    GROUP BY mes
+    ORDER BY mes
+""").df()
+
+px.line(
+    p2_mes, x="mes", y="saldo_mediano", markers=True,
+    title="Saldo relativo mediano por mês em 2024",
+    width=700, height=400
+).update_xaxes(dtick=1).show()
+
+px.box(
+    con.sql("SELECT mes, saldo_relativo FROM pix").df(),
+    x="mes", y="saldo_relativo",
+    title="Distribuição do saldo relativo por mês em 2024",
+    width=700, height=400
+).update_xaxes(dtick=1).show()
+```
+Embora o gráfico de linha pareça oscilar bastante entre janeiro/maio e setembro, esse efeito vem da escala vertical muito aproximada: a variação total da mediana ao longo de todo o ano é de apenas cerca de 0,007 ponto. No boxplot por mês, as 12 caixas aparecem praticamente alinhadas na mesma faixa logo abaixo de zero, sem tendência nem pico sazonal visível. Como a expectativa de estabilidade parece se sustentar no agregado, o próximo passo a desafia separando os municípios por quartil de volume (`Q1` a `Q4`), para verificar se algum grupo específico apresenta sazonalidade escondida pela mistura.
+
+
+## Uma terceira coluna
+```{python}
+#| label: p2-por-faixa
+p2_faixa = con.sql("""
+    WITH mun_faixa AS (
+        SELECT
+            Municipio,
+            NTILE(4) OVER (ORDER BY MEDIAN(volume_total)) AS quartil_vol
+        FROM pix
+        GROUP BY Municipio
+    )
+    SELECT
+        p.mes,
+        'Q' || m.quartil_vol AS faixa_volume,
+        MEDIAN(p.saldo_relativo) AS saldo_mediano
+    FROM pix p
+    JOIN mun_faixa m USING (Municipio)
+    GROUP BY p.mes, m.quartil_vol
+    ORDER BY m.quartil_vol, p.mes
+""").df()
+
+px.line(
+    p2_faixa, x="mes", y="saldo_mediano", color="faixa_volume", markers=True,
+    category_orders={"faixa_volume": ["Q1", "Q2", "Q3", "Q4"]},
+    title="Saldo relativo mediano por mês e por quartil de volume (2024)",
+    width=700, height=400
+).update_xaxes(dtick=1).show()
+```
+Ao separar os municípios pelos quatro quartis de volume, a estabilidade ao longo do ano se mantém dentro de cada grupo: nenhuma das quatro faixas apresenta tendência clara nem pico sazonal de fim de ano, oscilando em uma faixa estreita em torno do próprio patamar (cerca de 0,008 a 0,012 ponto de amplitude). Além disso, a hierarquia vista na P1 — com `Q4` consistentemente acima dos demais e `Q1` na parte inferior — permanece preservada em praticamente todos os meses. Isso afasta a rival de mistura de grupos (não há uma sazonalidade forte escondida em um porte específico que se anulava no agregado). A tabela cruzada a seguir traz os números exatos mês a mês, comparando o saldo relativo com o volume total do estado.
+
+## A tabela cruzada
+```{python}
+#| label: p2-cruzada
+con.sql("""
+    SELECT
+        mes,
+        COUNT(*) AS n_municipios,
+        ROUND(MEDIAN(saldo_relativo), 3) AS saldo_mediano,
+        ROUND(AVG(saldo_relativo), 3) AS saldo_medio,
+        ROUND(100.0 * AVG(CASE WHEN saldo_relativo > 0 THEN 1 ELSE 0 END), 3) AS pct_positivo,
+        ROUND(SUM(volume_total) / 1e9, 3) AS volume_total_bi
+    FROM pix
+    GROUP BY mes
+    ORDER BY mes
+""").df()
+```
+A expectativa **se sustentou**. Mesmo com o forte crescimento do volume financeiro ao longo de 2024 (de R$ 55,966 bilhões em janeiro para R$ 78,188 bilhões em novembro), o `saldo_relativo` mediano permaneceu estável em todos os meses, variando apenas entre -0,039 (maio) e -0,031 (setembro) — amplitude total de 0,008 ponto. A rival de mistura de grupos por porte foi eliminada, pois nenhum dos quatro quartis de volume (`Q1` a `Q4`) apresentou tendência ou pico sazonal sincronizado. Ficam pendentes o acaso e a estabilidade no tempo (como a exploração cobre apenas 2024, o dado guardado de 2025 é necessário para verificar se a estabilidade se repete).
+
+# Bloco 5: P3, do segundo passo ao quarto
+
+**Pergunta:** O valor recebido por empresas (`VL_RecebedorPJ`) anda junto com o saldo relativo? 
+
+**Expectativa:** Sim, municípios com maior valor recebido por PJ têm saldo relativo mais alto.
+
+## Duas colunas
+
+Como `VL_RecebedorPJ` e `saldo_relativo` são duas variáveis numéricas e o valor recebido por PJ cobre várias ordens de grandeza, usamos um gráfico de dispersão com o eixo horizontal em escala logarítmica.
+
+```{python}
+#| label: p3-dispersao
+p3 = con.sql("""
+    SELECT
+        Municipio,
+        mes,
+        VL_RecebedorPJ,
+        volume_total,
+        saldo_relativo,
+        VL_RecebedorPJ / valor_recebido AS fatia_rec_pj
+    FROM pix
+    WHERE VL_RecebedorPJ > 0
+""").df()
+
+px.scatter(
+    p3, x="VL_RecebedorPJ", y="saldo_relativo",
+    log_x=True, opacity=0.45,
+    hover_data=["Municipio", "mes"],
+    title="Dispersão: VL_RecebedorPJ (log) vs. saldo_relativo (2024)",
+    width=700, height=400
+).show()
+```
+
+A nuvem de pontos apresenta uma leve inclinação positiva conforme `VL_RecebedorPJ` cresce entre R$ 1 milhão e R$ 100 milhões, mas a maior parte das observações continua concentrada abaixo de zero e os maiores valores à direita (perto de R$ 1 bilhão e R$ 10 bilhões) não mantêm essa subida, permanecendo próximos ou abaixo de zero. Como o desenho é muito parecido com o de `volume_total` na P1, surge a rival de que o padrão reflita apenas o **porte do município**, e não um efeito próprio de PJ. O próximo passo testa essa rival separando os municípios por quartil de volume e substituindo o valor absoluto pela fatia de PJ nos recebimentos.
+
+## Uma terceira coluna
+```{python}
+#| label: p3-por-porte
+p3_porte = con.sql("""
+    WITH mun_faixa AS (
+        SELECT
+            Municipio,
+            NTILE(4) OVER (ORDER BY MEDIAN(volume_total)) AS quartil_vol
+        FROM pix
+        GROUP BY Municipio
+    )
+    SELECT
+        p.Municipio,
+        'Q' || m.quartil_vol AS faixa_volume,
+        MEDIAN(p.VL_RecebedorPJ) AS vl_rec_pj_mediano,
+        MEDIAN(p.VL_RecebedorPJ / p.valor_recebido) AS fatia_rec_pj_mediana,
+        MEDIAN(p.saldo_relativo) AS saldo_mediano
+    FROM pix p
+    JOIN mun_faixa m USING (Municipio)
+    WHERE p.VL_RecebedorPJ > 0
+    GROUP BY p.Municipio, m.quartil_vol
+""").df()
+
+px.scatter(
+    p3_porte, x="vl_rec_pj_mediano", y="saldo_mediano",
+    color="faixa_volume", log_x=True,
+    category_orders={"faixa_volume": ["Q1", "Q2", "Q3", "Q4"]},
+    hover_data=["Municipio"],
+    title="Um ponto por município: VL_RecebedorPJ (log) vs. saldo relativo por porte",
+    width=700, height=400
+).show()
+
+px.scatter(
+    p3_porte, x="fatia_rec_pj_mediana", y="saldo_mediano",
+    color="faixa_volume",
+    category_orders={"faixa_volume": ["Q1", "Q2", "Q3", "Q4"]},
+    hover_data=["Municipio"],
+    title="Fatia de PJ nos recebimentos vs. saldo relativo por porte (um ponto por município)",
+    width=700, height=400
+).show()
+```
+
+No gráfico com `VL_RecebedorPJ` em valor absoluto (um ponto por município), as quatro cores (`Q1` a `Q4`) se organizam quase em fila da esquerda para a direita, mostrando que o valor recebido por PJ acompanha fortemente o porte do município; dentro de cada faixa de volume, a relação com o saldo relativo é discreta. Ao remover a escala e olhar a **fatia de PJ nos recebimentos**, os portes se misturam mais no eixo horizontal: nota-se uma leve tendência de alta até cerca de 35\% de participação PJ (onde se concentram vários dos poucos saldos positivos), mas mesmo entre os municípios com maior fatia PJ (acima de 45\%), ainda há polos de `Q4` com saldo mediano negativo. A tabela cruzada a seguir resume os números exatos por quartil de `VL_RecebedorPJ`.
+
+## A tabela cruzada
+```{python}
+#| label: p3-cruzada
+con.sql("""
+    WITH mun_pj AS (
+        SELECT
+            Municipio,
+            NTILE(4) OVER (ORDER BY MEDIAN(VL_RecebedorPJ)) AS quartil_pj
+        FROM pix
+        GROUP BY Municipio
+    )
+    SELECT
+        'PJ_Q' || m.quartil_pj AS faixa_vl_rec_pj,
+        COUNT(DISTINCT p.Municipio) AS n_municipios,
+        ROUND(MEDIAN(p.VL_RecebedorPJ) / 1e6, 3) AS vl_rec_pj_mediano_mi,
+        ROUND(100.0 * MEDIAN(p.VL_RecebedorPJ / p.valor_recebido), 3) AS fatia_rec_pj_pct,
+        ROUND(MEDIAN(p.saldo_relativo), 3) AS saldo_mediano,
+        ROUND(100.0 * AVG(CASE WHEN p.saldo_relativo > 0 THEN 1 ELSE 0 END), 3) AS pct_positivo
+    FROM pix p
+    JOIN mun_pj m USING (Municipio)
+    GROUP BY m.quartil_pj
+    ORDER BY m.quartil_pj
+""").df()
+```
+
+A expectativa **se sustentou em parte**. O `saldo_relativo` mediano sobe de forma contínua do menor ao maior quartil de `VL_RecebedorPJ` — passando de -0,044 em `PJ_Q1` para -0,041 em `PJ_Q2`, -0,032 em `PJ_Q3` e -0,018 em `PJ_Q4` — enquanto o percentual de meses com saldo positivo salta de 2,424\% para 22,840\%. Mesmo assim, a mediana permanece negativa em `PJ_Q4`, e o gráfico por porte mostrou que grande parte dessa variação acompanha o tamanho do município (`volume_total`), embora a fatia de PJ nos recebimentos ainda apresente leve associação positiva até cerca de 35\%. A rival de repetição de meses por município foi eliminada; a rival de porte explica parte do padrão sem eliminá-lo totalmente. Ficam pendentes o acaso, a direção/causalidade e a estabilidade no tempo (2025).
+
+# Bloco 7: a tabela de hipóteses a confirmar
+
+Uma linha por pergunta do Bloco 1, com os cinco campos do protocolo. As previsões serão conferidas na Etapa 3 sobre o ano de **2025**, que permaneceu guardado.
+
+| # | Expectativa | Padrão, com o número, e veredito | Rivais eliminadas | Rivais pendentes | Decisão e previsão que a confirma |
+|:--|:--|:--|:--|:--|:--|
+| P1 | Municípios com maior volume financeiro têm saldo relativo mais positivo | **Sustentou-se em parte.** O saldo mediano sobe continuamente de -0,044 (`Q1`) para -0,022 (`Q4`) e os meses positivos sobem de 5,455\% para 17,130\%, mas mesmo `Q4` segue com mediana negativa | Repetição de meses por município (o padrão se mantém com 1 ponto por município) | Acaso; estabilidade no tempo; direção/causa (efeito de outras variáveis ligadas ao porte) | Não assumir que polos maiores são automaticamente superavitários. Se, em 2025, a ordem crescente do saldo mediano de `Q1` a `Q4` se repetir com mediana de `Q4` ainda negativa, o porte reduz o déficit relativo sem revertê-lo; se não, o padrão de 2024 foi circunstancial |
+| P2 | O saldo relativo se mantém estável ao longo dos meses, mesmo com variação no volume | **Sustentou-se.** O saldo mediano variou apenas entre -0,039 (maio) e -0,031 (setembro), amplitude de 0,008, enquanto o volume estadual saltou de R$ 55,966 bi (jan) para R$ 79,209 bi (mai) e R$ 78,188 bi (nov) | Mistura de grupos por porte (nenhum quartil `Q1`–`Q4` apresentou tendência ou pico sazonal sincronizado) | Acaso; estabilidade no tempo (apenas 1 ano explorado) | Planejar a comparação 2024–2025 sem precisar de ajuste sazonal mensal no saldo relativo. Se, em 2025, a amplitude mensal da mediana continuar abaixo de 0,015 sem pico sincronizado nos quartis, a estabilidade mensal se confirma; se não, há sazonalidade a tratar |
+| P3 | Municípios com maior `VL_RecebedorPJ` têm saldo relativo mais alto | **Sustentou-se em parte.** O saldo mediano sobe de -0,044 (`PJ_Q1`) para -0,018 (`PJ_Q4`) e os meses positivos sobem de 2,424\% para 22,840\%, mas `PJ_Q4` ainda tem mediana negativa e há forte sobreposição com o porte | Repetição de meses por município; porte explica parte do efeito, mas a fatia de PJ ainda mostra leve associação até ~35% | Acaso; direção/causalidade; estabilidade no tempo; confusão residual com porte | Não atribuir o saldo positivo apenas ao volume absoluto de PJ. Se, em 2025, `PJ_Q4` mantiver mediana acima de `PJ_Q1` e percentual de meses positivos acima de $15\%$, vale modelar a participação de PJ na explicação das variações; se não, a relação era circunstancial |
+
+# Bloco 8: perguntas para depois
+
+Achados que apareceram fora das perguntas do Bloco 1 e ficam registrados sem investigação agora:
+
+- Por que quase todos os municípios do Maranhão apresentam `saldo_relativo` negativo em 2024 (saída líquida de recursos via Pix para fora do estado ou concentração em domicílios bancários de outras UFs)?
+- Qual município aparece como extremo negativo isolado na faixa de `Q3` (com `saldo_mediano` próximo de -0,35 e meses abaixo de -0,40) e o que explica esse comportamento?
+- Por que os maiores polos do estado (`Q4`, com `fatia_rec_pj_mediana` acima de 45\%) ainda mantêm saldo relativo mediano negativo?
+- O que explica o salto no volume total estadual do Pix de R$ 55,966 bilhões em janeiro para R$ 79,209 bilhões em maio de 2024?
