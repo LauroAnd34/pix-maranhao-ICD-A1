@@ -17,7 +17,7 @@ execute:
 
 # Preparação: o recorte da exploração
 
-A exploração usará apenas os dados de janeiro de 2024 a junho de 2025. O segundo semestre de 2025 (julho a dezembro) ficará guardado para a confirmação de hipóteses na próxima etapa e **não será olhado aqui**.
+A exploração usará apenas os dados de 2024 (janeiro a dezembro). O ano de 2025 inteiro ficará guardado para a confirmação de hipóteses na próxima etapa e **não será olhado aqui**.
 
 ```{python}
 #| label: setup

@@ -34,6 +34,8 @@ uv sync
 uv run python src/ingest.py
 uv run quarto render analises/diagnostico.qmd
 uv run python src/transform.py
+uv run quarto render analises/exploracao.qmd
+uv run python src/model.py
 ```
 
 ## O que cada etapa produz
@@ -51,6 +53,17 @@ uv run python src/transform.py
 - **`analises/diagnostico.qmd`** — lê a coleta mais recente de `data/raw/` e diagnostica o dado bruto em SQL (DuckDB): perfil com `SUMMARIZE`, duplicatas, ausências (tabela de decisão com a consulta de cada conclusão) e extremos de cada município contra a própria série. O dado veio sem nulos e sem duplicatas, mas 13 linhas de 9 municípios passam de 5 vezes a mediana do próprio município em alguma coluna. Elas foram mantidas e marcadas com `extremo_serie_municipio`, e mudam o ranking da pergunta analítica (2 municípios invertem o sinal da variação), então a Etapa 2 deve apresentar o resultado com e sem elas.
 
 - **`src/transform.py`** — lê a coleta mais recente em `data/raw/` e aplica o contrato Pandera (`strict` e `coerce`), com o tipo e a faixa de cada coluna, a chave única (`AnoMes`, `Municipio_Ibge`) e duas regras de tabela entre colunas: o volume total do município-mês é maior que zero, e a quantidade de transações nunca é menor que a de pessoas distintas. Depois calcula o *saldo relativo* e grava `data/trusted/pix_maranhao_trusted.parquet`. A política é Fail-Stop: se qualquer linha violar o contrato, o pipeline para, mostra o resumo por motivo e não grava nada, porque um relatório feito sobre uma base desfalcada é pior que um pipeline parado. Na coleta atual ele aprovou as 5.208 linhas e rejeitou 0, mas isso é o resultado desta coleta e não uma garantia: a política vale enquanto a fonte se mantiver estável. A pasta `data/quarentena/` é criada pelo pipeline e fica vazia, porque no Fail-Stop nenhuma linha é desviada para ela.
+
+- **`analises/exploracao.qmd`** — análise exploratória sobre o recorte de 2024 (guardando 2025 para a Etapa 3). Investiga 3 perguntas analíticas com formulação de hipóteses, varreduras univariada, bivariada e trivariada com controle por quartis de volume e participação de PJ, tabelas cruzadas e formulação da tabela de hipóteses a confirmar.
+
+- **`src/model.py`** — lê a camada `trusted` e constrói o modelo dimensional (Star Schema) na camada `data/gold/`. Cria dimensões com chaves substitutas inteiras (`dim_municipio`), dimensão contínua de data (`dim_tempo`), fato atômica mensal (`fato_pix_mensal`) e fato agregada anual (`fato_pix_anual_municipio`). Valida a integridade referencial antes da gravação (Fail-Stop) e imprime conferência lado a lado entre `trusted` e `gold` comprovando 100% de paridade das métricas.
+
+### Tabelas em `data/gold/`
+
+- **`dim_tempo.parquet`** (24 linhas): dimensão temporal contínua cobrindo 2024-01 a 2025-12, chave primária `data`, com atributos `ano`, `mes`, `nome_mes`, `trimestre` e `semestre`.
+- **`dim_municipio.parquet`** (217 linhas): dimensão de municípios maranhenses com chave substituta `sk_municipio`, chave natural `codigo_ibge`, `nome_municipio`, `codigo_estado`, `sigla_estado`, `estado`, `sigla_regiao` e `regiao`.
+- **`fato_pix_mensal.parquet`** (5.208 linhas): fato atômica no grão município-mês ligada a `dim_municipio` por `sk_municipio` e a `dim_tempo` por `data`, contendo medidas monetárias (`vl_*`), transações (`qt_*`), pessoas distintas (`qt_pes_*`) e `saldo_relativo`.
+- **`fato_pix_anual_municipio.parquet`** (434 linhas): fato agregada no grão município-ano ligada a `sk_municipio`, contendo `vl_recebido_anual`, `vl_pago_anual`, `vl_total_anual`, `qt_total_transacoes` e `saldo_relativo_anual`.
 
 
 
