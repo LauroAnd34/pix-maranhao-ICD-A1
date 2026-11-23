@@ -17,7 +17,7 @@ execute:
 
 # Preparação: o recorte da exploração
 
-A exploração usará apenas os dados de 2024 (janeiro a dezembro). O ano de 2025 inteiro ficará guardado para a confirmação de hipóteses na próxima etapa e **não será olhado aqui**.
+A exploração usará apenas os dados de 2024 (janeiro a dezembro). O ano de 2025 inteiro ficará guardado para a confirmação de hipóteses na próxima etapa e **não será olhado aqui**. O corte é por tempo, e por um ano inteiro e não por meses soltos, por dois motivos: a pergunta da equipe compara 2024 com 2025, então 2025 é o dado que vai julgar as previsões; e o ano inteiro preserva os 12 meses de qualquer sazonalidade, que a pergunta P2 precisa enxergar.
 
 ```{python}
 #| label: setup
@@ -87,7 +87,7 @@ con.sql("""
  As colunas Estado, Estado_Ibge, Regiao e Sigla_Regiao são constantes (possuem apenas 1 valor distinto, referente ao Maranhão/Nordeste) e, portanto, não formam grupos para gráficos de barras. Seguindo o protocolo da aula, as colunas de identificador (Municipio e Municipio_Ibge) e a coluna de data (AnoMes) não recebem gráficos univariados neste bloco e entram apenas nos próximos passos, quando as perguntas analíticas as exigirem.
 
 ```{python}
- #| label: checagem-zeros
+#| label: checagem-zeros
 con.sql("""
     SELECT
         SUM(CASE WHEN VL_PagadorPF = 0 THEN 1 ELSE 0 END) AS zero_vl_pag_pf,
