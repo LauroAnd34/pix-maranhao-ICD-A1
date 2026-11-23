@@ -141,6 +141,15 @@ def conferir_chaves(con: duckdb.DuckDBPyConnection) -> None:
             WHERE d.{coluna} IS NULL
         """).fetchall()[0][0]
         print(f"  {origem + '.' + chave.removeprefix('o.'):35} -> {dimensao:15} {n:5d}")
+        if n:
+            ausentes = con.sql(f"""
+                SELECT DISTINCT {chave} AS chave
+                FROM {origem} o LEFT JOIN {dimensao} d ON d.{coluna} = {chave}
+                WHERE d.{coluna} IS NULL
+                ORDER BY 1
+                LIMIT 5
+            """).fetchall()
+            print(f"    chaves que faltam em {dimensao} (até 5): {[str(c) for (c,) in ausentes]}")
         faltando += n
     if faltando:
         parar(f"{faltando} linhas sem chave na dimensão: corrija a dimensão antes de construir a fato")
