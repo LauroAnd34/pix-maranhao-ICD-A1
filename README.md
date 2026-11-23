@@ -56,14 +56,14 @@ uv run python src/model.py
 
 - **`analises/exploracao.qmd`** — análise exploratória sobre o recorte de 2024 (guardando 2025 para a Etapa 3). Investiga 3 perguntas analíticas com formulação de hipóteses, varreduras univariada, bivariada e trivariada com controle por quartis de volume e participação de PJ, tabelas cruzadas e formulação da tabela de hipóteses a confirmar.
 
-- **`src/model.py`** — lê a camada `trusted` e constrói o modelo dimensional (Star Schema) na camada `data/gold/`. Cria dimensões com chaves substitutas inteiras (`dim_municipio`), dimensão contínua de data (`dim_tempo`), fato atômica mensal (`fato_pix_mensal`) e fato agregada anual (`fato_pix_anual_municipio`). Valida a integridade referencial antes da gravação (Fail-Stop) e imprime conferência lado a lado entre `trusted` e `gold` comprovando 100% de paridade das métricas.
+- **`src/model.py`** — lê a camada `trusted` e constrói o modelo dimensional (Star Schema) em DuckDB na camada `data/gold/`. Cria dimensões com chaves substitutas (`dim_municipio`), dimensão contínua de data (`dim_data`), fato atômica mensal (`fato_pix_mensal`) e fato agregada anual (`fato_pix_anual_municipio`). Valida chaves naturais por LEFT JOIN antes da gravação (Fail-Stop), confere 100% das métricas e grava os arquivos em Parquet.
 
 ### Tabelas em `data/gold/`
 
-- **`dim_tempo.parquet`** (24 linhas): dimensão temporal contínua cobrindo 2024-01 a 2025-12, chave primária `data`, com atributos `ano`, `mes`, `nome_mes`, `trimestre` e `semestre`.
-- **`dim_municipio.parquet`** (217 linhas): dimensão de municípios maranhenses com chave substituta `sk_municipio`, chave natural `codigo_ibge`, `nome_municipio`, `codigo_estado`, `sigla_estado`, `estado`, `sigla_regiao` e `regiao`.
-- **`fato_pix_mensal.parquet`** (5.208 linhas): fato atômica no grão município-mês ligada a `dim_municipio` por `sk_municipio` e a `dim_tempo` por `data`, contendo medidas monetárias (`vl_*`), transações (`qt_*`), pessoas distintas (`qt_pes_*`) e `saldo_relativo`.
-- **`fato_pix_anual_municipio.parquet`** (434 linhas): fato agregada no grão município-ano ligada a `sk_municipio`, contendo `vl_recebido_anual`, `vl_pago_anual`, `vl_total_anual`, `qt_total_transacoes` e `saldo_relativo_anual`.
+- **`dim_data.parquet`** (24 linhas): dimensão temporal contínua cobrindo 2024-01 a 2025-12, chave primária `data`, com atributos `ano`, `mes`, `nome_mes`, `trimestre` e `semestre`.
+- **`dim_municipio.parquet`** (217 linhas): dimensão de municípios maranhenses com chave substituta `municipio_sk`, chave natural `codigo_ibge`, `nome_municipio`, `codigo_estado`, `sigla_estado`, `estado`, `sigla_regiao` e `regiao`.
+- **`fato_pix_mensal.parquet`** (5.208 linhas): fato atômica no grão município-mês ligada a `dim_municipio` por `municipio_sk` e a `dim_data` por `data`, contendo medidas monetárias (`vl_*`), transações (`qt_*`), pessoas distintas (`qt_pes_*`) e `saldo_relativo`.
+- **`fato_pix_anual_municipio.parquet`** (434 linhas): fato agregada no grão município-ano ligada a `municipio_sk`, contendo `vl_recebido_anual`, `vl_pago_anual`, `vl_total_anual`, `qt_total_transacoes` e `saldo_relativo_anual`.
 
 
 
