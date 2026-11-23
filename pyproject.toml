@@ -1,7 +1,7 @@
 [project]
 name = "pix-maranhao"
 version = "0.1.0"
-description = "Etapa 1 - Introducao a Ciencia de Dados: Pix por municipio no Maranhao"
+description = "Etapas 1 e 2 - Introducao a Ciencia de Dados: Pix por municipio no Maranhao"
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",

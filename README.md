@@ -1,6 +1,6 @@
 # Pix por município — Maranhão (2024-2025)
 
-Projeto da Etapa 1 
+Projeto das Etapas 1 e 2 (do dado bruto ao gold)
 Introdução à Ciência de Dados, IFMA, prof. Josenildo Silva.
 
 ## Fonte de dados
@@ -50,7 +50,7 @@ uv run python src/model.py
   Testado de verdade contra a API: **5.208 registros** (217 municípios × 24
   meses), coleta 24/24 meses sem falha.
 
-- **`analises/diagnostico.qmd`** — lê a coleta mais recente de `data/raw/` e diagnostica o dado bruto em SQL (DuckDB): perfil com `SUMMARIZE`, duplicatas, ausências (tabela de decisão com a consulta de cada conclusão) e extremos de cada município contra a própria série. O dado veio sem nulos e sem duplicatas, mas 13 linhas de 9 municípios passam de 5 vezes a mediana do próprio município em alguma coluna. Elas foram mantidas e marcadas com `extremo_serie_municipio`, e mudam o ranking da pergunta analítica (2 municípios invertem o sinal da variação), então a Etapa 2 deve apresentar o resultado com e sem elas.
+- **`analises/diagnostico.qmd`** — lê a coleta mais recente de `data/raw/` e diagnostica o dado bruto em SQL (DuckDB): perfil com `SUMMARIZE`, duplicatas, ausências (tabela de decisão com a consulta de cada conclusão) e extremos de cada município contra a própria série. O dado veio sem nulos e sem duplicatas, mas 13 linhas de 9 municípios passam de 5 vezes a mediana do próprio município em alguma coluna. Elas foram mantidas e marcadas com `extremo_serie_municipio`, e mudam o ranking da pergunta analítica (2 municípios invertem o sinal da variação), então a análise da pergunta (Etapa 3, quando 2025 for aberto) deve apresentar o resultado com e sem elas.
 
 - **`src/transform.py`** — lê a coleta mais recente em `data/raw/` e aplica o contrato Pandera (`strict` e `coerce`), com o tipo e a faixa de cada coluna, a chave única (`AnoMes`, `Municipio_Ibge`) e duas regras de tabela entre colunas: o volume total do município-mês é maior que zero, e a quantidade de transações nunca é menor que a de pessoas distintas. Depois calcula o *saldo relativo* e grava `data/trusted/pix_maranhao_trusted.parquet`. A política é Fail-Stop: se qualquer linha violar o contrato, o pipeline para, mostra o resumo por motivo e não grava nada, porque um relatório feito sobre uma base desfalcada é pior que um pipeline parado. Na coleta atual ele aprovou as 5.208 linhas e rejeitou 0, mas isso é o resultado desta coleta e não uma garantia: a política vale enquanto a fonte se mantiver estável. A pasta `data/quarentena/` é criada pelo pipeline e fica vazia, porque no Fail-Stop nenhuma linha é desviada para ela.
 
@@ -63,7 +63,7 @@ uv run python src/model.py
 - **`dim_data.parquet`** (24 linhas): dimensão temporal contínua cobrindo 2024-01 a 2025-12, chave primária `data`, com atributos `ano`, `mes`, `nome_mes`, `trimestre` e `semestre`.
 - **`dim_municipio.parquet`** (217 linhas): dimensão de municípios maranhenses com chave substituta `municipio_sk`, chave natural `codigo_ibge`, `nome_municipio`, `codigo_estado`, `sigla_estado`, `estado`, `sigla_regiao` e `regiao`.
 - **`fato_pix_mensal.parquet`** (5.208 linhas): fato atômica no grão município-mês ligada a `dim_municipio` por `municipio_sk` e a `dim_data` por `data`, contendo medidas monetárias (`vl_*`), transações (`qt_*`), pessoas distintas (`qt_pes_*`) e `saldo_relativo`.
-- **`fato_pix_anual_municipio.parquet`** (434 linhas): fato agregada no grão município-ano ligada a `municipio_sk`, contendo `vl_recebido_anual`, `vl_pago_anual`, `vl_total_anual`, `qt_total_transacoes` e `saldo_relativo_anual`.
+- **`fato_pix_anual_municipio.parquet`** (434 linhas): fato agregada no grão município-ano ligada a `municipio_sk`, contendo `ano`, `meses`, `vl_recebido_anual`, `vl_pago_anual`, `vl_total_anual`, `qt_total_transacoes` e `saldo_relativo_anual`.
 
 
 
